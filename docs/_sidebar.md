@@ -1,3 +1,2 @@
 - [简介](README.md)
 - [gridbuffer](gridbuffer.md)
-- [变更日志](changelog.md)
