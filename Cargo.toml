@@ -3,4 +3,22 @@ name = "gridbuffer"
 version = "0.1.0"
 edition = "2021"
 
+[[test]]
+name = "test"
+path = "tests/tests.rs"
+
 [dependencies]
+log = "0.4"
+tokio = { version = "1.39", features = ["full"] }
+env_logger = "0.7"
+anyhow = "1.0"
+base64 = "0.22.1"
+clap = "4.5.13"
+rand = "0.8.5"
+num_cpus = "1.16"
+coarsetime = "0.1"
+likely_stable = "0.1"
+sync-unsafe-cell = "0.1.1"
+chrono = "0.4.38"
+bitpacking = "0.5"
+paste = "1.0"
