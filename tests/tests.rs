@@ -10,8 +10,6 @@ use log::info;
 
 use gridbuffer::core::tool::setup_log;
 
-use paste::paste;
-
 #[test]
 fn test_compression() {
     setup_log();
@@ -27,6 +25,7 @@ fn test_compression() {
     // Detects if `SSE3` is available on the current computed
     // and uses the best available implementation accordingly.
     let bitpacker = BitPacker4x::new();
+    let bitpacker_sorted = BitPacker4x::new();
 
     // Computes the number of bits used for each integer in the blocks.
     // my_data is assumed to have a len of 128 for `BitPacker4x`.
@@ -59,4 +58,22 @@ fn test_compression() {
     );
 
     assert_eq!(&my_data, &decompressed);
+
+    let mut my_data_sorted = my_data.clone();
+    my_data_sorted.sort();
+
+    let num_bits_sorted: u8 = bitpacker_sorted.num_bits(&my_data_sorted);
+    assert_eq!(num_bits_sorted, 4);
+    info!("num_bits_sorted: {}", num_bits_sorted);
+
+    let mut compressed_sorted = vec![0u8; 4 * BitPacker4x::BLOCK_LEN];
+
+    let compressed_len_sorted = bitpacker_sorted.compress_sorted(
+        0,
+        &my_data_sorted,
+        &mut compressed_sorted[..],
+        num_bits_sorted,
+    );
+
+    info!("compressed_len_sorted: {}", compressed_len_sorted);
 }

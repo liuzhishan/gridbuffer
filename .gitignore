@@ -28,3 +28,4 @@ Cargo.lock
 **/data/
 .git
 .DS_Store
+**/resources/
