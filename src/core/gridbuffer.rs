@@ -87,8 +87,11 @@ pub enum GridDataType {
     F32,
 }
 
+pub const GRID_BUFFER_VERSION: u8 = 1;
+
 /// GridBuffer format.
 pub struct GridBuffer {
+    version: u8,
     num_rows: usize,
     num_cols: usize,
     u64_data: Vec<u64>,
@@ -100,6 +103,7 @@ impl GridBuffer {
     /// Construct a new grid buffer.
     pub fn new(num_rows: usize, num_cols: usize, capacity: usize) -> Self {
         Self {
+            version: GRID_BUFFER_VERSION,
             num_rows,
             num_cols,
             u64_data: Vec::with_capacity(capacity),
@@ -117,6 +121,7 @@ impl GridBuffer {
         cells: Vec<Vec<GridCell>>,
     ) -> Self {
         Self {
+            version: GRID_BUFFER_VERSION,
             num_rows,
             num_cols,
             u64_data,
@@ -247,23 +252,27 @@ impl GridBuffer {
     ///
     /// The format is the following concatenation:
     ///
-    /// 1. num_rows: usize
-    /// 2. num_cols: usize
-    /// 3. total_num_u64_values: usize
-    /// 4. total_num_f32_values: usize
-    /// 5. num_rows * num_cols * 2 usize:
+    /// 1. version: u8
+    /// 2. num_rows: usize
+    /// 3. num_cols: usize
+    /// 4. total_num_u64_values: usize
+    /// 5. total_num_f32_values: usize
+    /// 6. num_rows * num_cols * 2 usize:
     ///      for each cell, it's stored as:
     ///          data_type: u8
     ///          range.start: usize
     ///          range.end: usize
-    /// 6. compressed_u64_total_num_bytes: usize
-    /// 7. num_bits: u8
-    /// 8. compressed u64 bytes
-    /// 9. compressed_f32_total_num_bytes: usize
-    /// 10. num_bits: u8
-    /// 11. compressed f32 bytes
+    /// 7. compressed_u64_total_num_bytes: usize
+    /// 8. num_bits: u8
+    /// 9. compressed u64 bytes
+    /// 10. compressed_f32_total_num_bytes: usize
+    /// 11. num_bits: u8
+    /// 12. compressed f32 bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.estimated_bytes());
+        
+        // version
+        self.push_u8_le(self.version, &mut buf);
 
         // num_rows, num_cols
         // Store as u32.
@@ -325,19 +334,17 @@ impl GridBuffer {
     #[inline]
     fn parse_num_rows_and_cols(bytes: &[u8]) -> (usize, usize) {
         (
-            Self::parse_usize_le_unchecked(bytes, 0),
-            Self::parse_usize_le_unchecked(bytes, 4),
+            Self::parse_usize_le_unchecked(bytes, 1),
+            Self::parse_usize_le_unchecked(bytes, 5),
         )
     }
 
     /// Parse num_u64_values and num_f32_values from bytes.
     #[inline]
     fn parse_num_u64_and_f32_values(bytes: &[u8]) -> (usize, usize) {
-        let usize_size = 4;
-
         (
-            Self::parse_usize_le_unchecked(bytes, 2 * usize_size),
-            Self::parse_usize_le_unchecked(bytes, 3 * usize_size),
+            Self::parse_usize_le_unchecked(bytes, 9),
+            Self::parse_usize_le_unchecked(bytes, 13),
         )
     }
 
@@ -352,7 +359,7 @@ impl GridBuffer {
         let mut cells = vec![vec![GridCell::default(); num_cols]; num_rows];
 
         let usize_size = 4;
-        let mut pos = 4 * usize_size;
+        let mut pos = 4 * usize_size + 1;
 
         for row in 0..num_rows {
             for col in 0..num_cols {
@@ -515,6 +522,9 @@ impl GridBuffer {
 
     /// Deserialize the GridBuffer from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        // version
+        let version = bytes[0];
+
         // num_rows, num_cols
         let (num_rows, num_cols) = Self::parse_num_rows_and_cols(bytes);
 
