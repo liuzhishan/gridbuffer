@@ -82,14 +82,21 @@ use super::{
 )]
 #[repr(u8)]
 pub enum GridDataType {
+    /// No data type.
     #[default]
+    None,
+
+    /// U64 data type.
     U64,
+
+    /// F32 data type.
     F32,
 }
 
 pub const GRID_BUFFER_VERSION: u8 = 1;
 
 /// GridBuffer format.
+#[derive(Clone)]
 pub struct GridBuffer {
     version: u8,
     num_rows: usize,
@@ -127,6 +134,18 @@ impl GridBuffer {
             u64_data,
             f32_data,
             cells,
+        }
+    }
+
+    /// Clear the grid buffer.
+    pub fn clear(&mut self) {
+        self.u64_data.clear();
+        self.f32_data.clear();
+
+        for row in &mut self.cells {
+            for cell in row {
+                cell.clear();
+            }
         }
     }
 
@@ -236,6 +255,7 @@ impl GridBuffer {
         match &self.cells[row][col] {
             GridCell::U64Cell(cell) => cell.range.len(),
             GridCell::F32Cell(cell) => cell.range.len(),
+            GridCell::None => 0,
         }
     }
 
@@ -373,7 +393,9 @@ impl GridBuffer {
                 let range_start = Self::parse_usize_le_unchecked(bytes, pos + 1);
                 let range_end = Self::parse_usize_le_unchecked(bytes, pos + 1 + usize_size);
 
-                if data_type == GridDataType::U64 {
+                if data_type == GridDataType::None {
+                    cells[row][col] = GridCell::None;
+                } else if data_type == GridDataType::U64 {
                     check_range(range_start, range_end, total_num_u64_values)?;
 
                     cells[row][col] = GridCell::U64Cell(GridCellU64 {
@@ -625,21 +647,43 @@ pub struct GridCellU64 {
     pub range: Range<usize>,
 }
 
+impl GridCellU64 {
+    /// Clear the cell.
+    #[inline]
+    pub fn clear(&mut self) {
+        self.range = 0..0;
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct GridCellF32 {
     pub range: Range<usize>,
 }
 
+impl GridCellF32 {
+    /// Clear the cell.
+    #[inline]
+    pub fn clear(&mut self) {
+        self.range = 0..0;
+    }
+}
+
 /// Use enum to represent different types of cells.
 #[derive(Clone)]
 pub enum GridCell {
+    /// No data type.
+    None,
+
+    /// U64 data type.
     U64Cell(GridCellU64),
+
+    /// F32 data type.
     F32Cell(GridCellF32),
 }
 
 impl Default for GridCell {
     fn default() -> Self {
-        Self::U64Cell(GridCellU64::default())
+        Self::None
     }
 }
 
@@ -647,6 +691,7 @@ impl GridCell {
     /// Get the range of the cell.
     pub fn range(&self) -> Range<usize> {
         match self {
+            GridCell::None => 0..0,
             GridCell::U64Cell(cell) => cell.range.clone(),
             GridCell::F32Cell(cell) => cell.range.clone(),
         }
@@ -655,8 +700,19 @@ impl GridCell {
     /// Get the data type of the cell.
     pub fn data_type(&self) -> GridDataType {
         match self {
+            GridCell::None => GridDataType::None,
             GridCell::U64Cell(_) => GridDataType::U64,
             GridCell::F32Cell(_) => GridDataType::F32,
+        }
+    }
+
+    /// Clear the cell.
+    #[inline]
+    pub fn clear(&mut self) {
+        match self {
+            GridCell::None => (),
+            GridCell::U64Cell(cell) => cell.clear(),
+            GridCell::F32Cell(cell) => cell.clear(),
         }
     }
 }
@@ -802,12 +858,7 @@ mod tests {
         );
 
         // Check if empty cells are still empty
-        let empty_u64_values = vec![];
-
-        assert_eq!(
-            restored_buffer.get_u64_values(0, 1),
-            Some(empty_u64_values.as_slice())
-        );
+        assert_eq!(restored_buffer.get_u64_values(0, 1), None);
         assert_eq!(restored_buffer.get_f32_values(1, 0), None);
 
         // Check total number of values

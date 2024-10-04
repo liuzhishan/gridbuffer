@@ -28,4 +28,4 @@ strum = { version = "0.26", features = ["derive"] }
 strum_macros = "0.26"
 
 [build-dependencies]
-tonic-build = "0.12"
+prost-build = "0.13.1"

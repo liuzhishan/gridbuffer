@@ -4,8 +4,8 @@
 use std::arch::x86_64::*;
 use std::simd::prelude::*;
 
-use log::{info, error};
 use likely_stable::{likely, unlikely};
+use log::{error, info};
 
 use bitpacking::BitPacker;
 use bitpacking::BitPacker4x;
@@ -37,7 +37,7 @@ pub fn compress_bitpacker4x(data: &[u32]) -> Vec<u8> {
 
         let block = &data[offset..offset + block_len];
         let num_bits = bitpacker.num_bits(block);
-        
+
         // Compress returns the len.
         let compressed_len = bitpacker.compress(block, &mut compressed[pos + 5..], num_bits);
 
@@ -59,7 +59,8 @@ pub fn compress_bitpacker4x(data: &[u32]) -> Vec<u8> {
     // Process the remaining data.
     // Use num_bits = 0 to indicate that the data is not compressed.
     if offset < data.len() {
-        compressed[pos..pos + 4].copy_from_slice(&(((data.len() - offset) * 4 )as u32).to_le_bytes());
+        compressed[pos..pos + 4]
+            .copy_from_slice(&(((data.len() - offset) * 4) as u32).to_le_bytes());
         compressed[pos + 4] = 0;
         pos += 5;
 

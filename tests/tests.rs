@@ -2,10 +2,15 @@
 #![feature(portable_simd)]
 use core::simd::prelude::*;
 
+use anyhow::Result;
+
 use bitpacking::BitPacker;
 use bitpacking::BitPacker4x;
 use bitpacking::BitPacker8x;
 
+use gridbuffer::core::performance::convert_simple_features_to_gridbuffer_file;
+use gridbuffer::core::performance::read_simple_features_from_file;
+use gridbuffer::core::performance::time_convert_simple_features_to_gridbuffer;
 use log::info;
 
 use gridbuffer::core::tool::setup_log;
@@ -76,4 +81,48 @@ fn test_compression() {
     );
 
     info!("compressed_len_sorted: {}", compressed_len_sorted);
+}
+
+/// Test SimpleFeatures size.
+#[test]
+fn test_simple_features_size() -> Result<()> {
+    setup_log();
+
+    let simple_features = read_simple_features_from_file("resources/simple_features_head_128.txt")?;
+
+    let mut count = 0;
+    for feature in simple_features {
+        count += 1;
+
+        info!(
+            "feature.sparse_features.len(): {}, feature.dense_features.len(): {}",
+            feature.sparse_feature.len(),
+            feature.dense_feature.len()
+        );
+    }
+
+    info!("count: {}", count);
+
+    Ok(())
+}
+
+#[test]
+fn test_convert_simple_features_to_gridbuffer() -> Result<()> {
+    setup_log();
+
+    time_convert_simple_features_to_gridbuffer("resources/simple_features_head_128.txt", 16, 81)?;
+
+    Ok(())
+}
+
+#[test]
+fn test_convert_simple_features_to_gridbuffer_file() -> Result<()> {
+    setup_log();
+
+    let filename = "resources/simple_features_nohash_96.txt";
+    let res_filename = "resources/gridbuffers_nohash_row_16_col_81.txt";
+
+    convert_simple_features_to_gridbuffer_file(filename, 16, 81, res_filename)?;
+
+    Ok(())
 }
