@@ -9,6 +9,8 @@ use bitpacking::BitPacker4x;
 use bitpacking::BitPacker8x;
 
 use gridbuffer::core::performance::convert_simple_features_to_gridbuffer_file;
+use gridbuffer::core::performance::convert_simple_features_to_gridbuffer_file_with_sorted;
+use gridbuffer::core::performance::convert_simple_features_to_gridbuffer_file_without_sorted;
 use gridbuffer::core::performance::read_simple_features_from_file;
 use gridbuffer::core::performance::time_convert_simple_features_to_gridbuffer;
 use log::info;
@@ -122,7 +124,19 @@ fn test_convert_simple_features_to_gridbuffer_file() -> Result<()> {
     let filename = "resources/simple_features_nohash_96.txt";
     let res_filename = "resources/gridbuffers_nohash_row_16_col_81.txt";
 
-    convert_simple_features_to_gridbuffer_file(filename, 16, 81, res_filename)?;
+    convert_simple_features_to_gridbuffer_file_without_sorted(filename, 16, 81, res_filename)?;
+
+    Ok(())
+}
+
+#[test]
+fn test_convert_simple_features_to_gridbuffer_file_with_sorted() -> Result<()> {
+    setup_log();
+
+    let filename = "resources/simple_features_nohash_96.txt";
+    let res_filename = "resources/gridbuffers_nohash_row_16_col_81_sorted.txt";
+
+    convert_simple_features_to_gridbuffer_file_with_sorted(filename, 16, 81, res_filename)?;
 
     Ok(())
 }
