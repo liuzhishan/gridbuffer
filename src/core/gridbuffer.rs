@@ -270,7 +270,7 @@ impl GridBuffer {
     /// 12. compressed f32 bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.estimated_bytes());
-        
+
         // version
         self.push_u8_le(self.version, &mut buf);
 
@@ -397,9 +397,13 @@ impl GridBuffer {
     }
 
     /// Parse u64 data from bytes.
-    /// 
+    ///
     /// Return the `u64_data`position of the next field.
-    fn parse_u64_data(bytes: &[u8], start_pos: usize, total_num_u64_values: usize) -> Result<(Vec<u64>, usize)> {
+    fn parse_u64_data(
+        bytes: &[u8],
+        start_pos: usize,
+        total_num_u64_values: usize,
+    ) -> Result<(Vec<u64>, usize)> {
         // compressed_u64_data_len.
         let usize_size = 4;
 
@@ -487,13 +491,17 @@ impl GridBuffer {
     }
 
     /// Parse f32 data from bytes.
-    /// 
+    ///
     /// Return the `f32_data`position of the next field.
-    fn parse_f32_data(bytes: &[u8], start_pos: usize, total_num_f32_values: usize) -> Result<(Vec<f32>, usize)> {
+    fn parse_f32_data(
+        bytes: &[u8],
+        start_pos: usize,
+        total_num_f32_values: usize,
+    ) -> Result<(Vec<f32>, usize)> {
         let usize_size = 4;
 
         let mut pos = start_pos;
-        
+
         // f32 data.
         let compressed_f32_data_len = Self::parse_usize_le_unchecked(bytes, pos);
         pos += usize_size;
