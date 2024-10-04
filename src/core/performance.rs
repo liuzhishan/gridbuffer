@@ -14,6 +14,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 
 use super::{gridbuffer::GridBuffer, timer::Timer};
 use crate::sniper::SimpleFeatures;
+use crate::core::tool::U32Sorter;
 
 /// Parse SimpleFeatures from base64 encoded protobuf data.
 pub fn parse_simple_features(data: &str) -> Result<SimpleFeatures> {
@@ -182,13 +183,22 @@ pub fn time_convert_simple_features_to_gridbuffer(
 pub fn save_gridbuffers_to_file(
     gridbuffers: impl Iterator<Item = GridBuffer>,
     file_path: &str,
+    is_sorted: bool,
 ) -> Result<()> {
     let file = std::fs::File::create(file_path)?;
     let mut writer = BufWriter::new(file);
 
+    let mut sorter = U32Sorter::new();
+
     for gridbuffer in gridbuffers {
-        let serialized = gridbuffer.to_base64();
-        writer.write_all(serialized.as_bytes())?;
+        if is_sorted {
+            let serialized = gridbuffer.to_base64_with_sorted(&mut sorter);
+            writer.write_all(serialized.as_bytes())?;
+        } else {
+            let serialized = gridbuffer.to_base64();
+            writer.write_all(serialized.as_bytes())?;
+        }
+
         writer.write("\n".as_bytes())?;
     }
 
@@ -200,11 +210,30 @@ pub fn convert_simple_features_to_gridbuffer_file(
     num_rows: usize,
     num_cols: usize,
     res_file_path: &str,
+    is_sorted: bool,
 ) -> Result<()> {
     let gridbuffers = convert_simple_features_to_gridbuffer(file_path, num_rows, num_cols)?;
-    save_gridbuffers_to_file(gridbuffers, res_file_path)?;
+    save_gridbuffers_to_file(gridbuffers, res_file_path, is_sorted)?;
 
     Ok(())
+}
+
+pub fn convert_simple_features_to_gridbuffer_file_without_sorted(
+    file_path: &str,
+    num_rows: usize,
+    num_cols: usize,
+    res_file_path: &str,
+) -> Result<()> {
+    convert_simple_features_to_gridbuffer_file(file_path, num_rows, num_cols, res_file_path, false)
+}
+
+pub fn convert_simple_features_to_gridbuffer_file_with_sorted(
+    file_path: &str,
+    num_rows: usize,
+    num_cols: usize,
+    res_file_path: &str,
+) -> Result<()> {
+    convert_simple_features_to_gridbuffer_file(file_path, num_rows, num_cols, res_file_path, true)
 }
 
 /// Time serializing GridBuffer to bytes.

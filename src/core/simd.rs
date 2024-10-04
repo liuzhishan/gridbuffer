@@ -12,9 +12,8 @@ use bitpacking::BitPacker4x;
 use bitpacking::BitPacker8x;
 
 /// Compress the data using SIMD.
-pub fn compress_bitpacker4x(data: &[u32]) -> Vec<u8> {
-    let bitpacker = BitPacker4x::new();
-    let block_len = BitPacker4x::BLOCK_LEN;
+pub fn compress_bitpacker<T: BitPacker>(bitpacker: &T, is_sorted: bool, data: &[u32]) -> Vec<u8> {
+    let block_len = T::BLOCK_LEN;
 
     // Need to store other info, such as length of each block.
     let estimated_len = data.len() * 4 + data.len() / block_len * 8 + 10;
@@ -39,7 +38,11 @@ pub fn compress_bitpacker4x(data: &[u32]) -> Vec<u8> {
         let num_bits = bitpacker.num_bits(block);
 
         // Compress returns the len.
-        let compressed_len = bitpacker.compress(block, &mut compressed[pos + 5..], num_bits);
+        let compressed_len = if is_sorted {
+            bitpacker.compress_sorted(0, block, &mut compressed[pos + 5..], num_bits)
+        } else {
+            bitpacker.compress(block, &mut compressed[pos + 5..], num_bits)
+        };
 
         // Store the total number of bytes compressed.
         compressed[pos..pos + 4].copy_from_slice(&(compressed_len as u32).to_le_bytes());
@@ -79,8 +82,49 @@ pub fn compress_bitpacker4x(data: &[u32]) -> Vec<u8> {
     compressed
 }
 
-/// Decompress the data using SIMD.
-pub fn decompress_bitpacker4x(data: &[u8], num_bits: u8, res: &mut [u32]) -> usize {
+/// Compress the data using SIMD.
+pub fn compress_bitpacker4x(data: &[u32]) -> Vec<u8> {
     let bitpacker = BitPacker4x::new();
-    bitpacker.decompress(&data, res, num_bits)
+    compress_bitpacker(&bitpacker, false, data)
+}
+
+/// Compress the data using SIMD and differential coding.
+pub fn compress_bitpacker4x_sorted(data: &[u32]) -> Vec<u8> {
+    let bitpacker = BitPacker4x::new();
+    compress_bitpacker(&bitpacker, true, data)
+}
+
+/// Decompress the data using SIMD.
+pub fn decompress_bitpacker<T: BitPacker>(
+    data: &[u8],
+    num_bits: u8,
+    res: &mut [u32],
+    is_sorted: bool,
+) -> usize {
+    let bitpacker = T::new();
+
+    if is_sorted {
+        bitpacker.decompress_sorted(0, &data, res, num_bits)
+    } else {
+        bitpacker.decompress(&data, res, num_bits)
+    }
+}
+
+pub fn decompress_bitpacker4x(data: &[u8], num_bits: u8, res: &mut [u32]) -> usize {
+    decompress_bitpacker::<BitPacker4x>(data, num_bits, res, false)
+}
+
+/// Decompress the data using SIMD.
+pub fn decompress_bitpacker8x(data: &[u8], num_bits: u8, res: &mut [u32]) -> usize {
+    decompress_bitpacker::<BitPacker8x>(data, num_bits, res, false)
+}
+
+/// Decompress the data using SIMD and differential coding.
+pub fn decompress_bitpacker4x_sorted(data: &[u8], num_bits: u8, res: &mut [u32]) -> usize {
+    decompress_bitpacker::<BitPacker4x>(data, num_bits, res, true)
+}
+
+/// Decompress the data using SIMD and differential coding.
+pub fn decompress_bitpacker8x_sorted(data: &[u8], num_bits: u8, res: &mut [u32]) -> usize {
+    decompress_bitpacker::<BitPacker8x>(data, num_bits, res, true)
 }

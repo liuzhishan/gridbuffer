@@ -65,18 +65,21 @@ use anyhow::{bail, Result};
 use bitpacking::BitPacker4x;
 use likely_stable::{likely, unlikely};
 use log::{error, info};
-use std::ops::Range;
+use std::{arch::is_riscv_feature_detected, default, ops::Range};
 use strum::{EnumCount, EnumDiscriminants, EnumString, FromRepr, ToString};
+
+use crate::core::tool::check_alignment_result;
 
 use bitpacking::BitPacker;
 
 use crate::error_bail;
 
 use super::{
-    simd::{compress_bitpacker4x, decompress_bitpacker4x},
-    tool::{check_data_length, check_range},
+    simd::{compress_bitpacker4x, compress_bitpacker4x_sorted, decompress_bitpacker, decompress_bitpacker4x},
+    tool::{check_compression_type, check_data_length, check_range, U32Sorter},
 };
 
+/// The data type of grid buffer.
 #[derive(
     Default, Clone, FromRepr, Debug, PartialEq, EnumCount, EnumDiscriminants, EnumString, ToString,
 )]
@@ -93,9 +96,45 @@ pub enum GridDataType {
     F32,
 }
 
+/// The compression type of data.
+#[derive(
+    Default, Clone, FromRepr, Debug, PartialEq, EnumCount, EnumDiscriminants, EnumString, ToString,
+)]
+#[repr(u8)]
+pub enum CompressionType {
+    /// No compression.
+    #[default]
+    None,
+
+    /// Bit packing 4x.
+    BitPacking4x,
+
+    /// Bit packing 8x.
+    BitPacking8x,
+
+    /// Differential coding.
+    DifferentialCoding,
+
+    /// Bit packing 4x and differential coding.
+    BitPacking4xDiffCoding,
+}
+
 pub const GRID_BUFFER_VERSION: u8 = 1;
 
+pub const FOUR: usize = 4;
+
+pub struct GridBasicInfo {
+    pub version: u8,
+    pub num_rows: usize,
+    pub num_cols: usize,
+    pub total_num_u64_values: usize,
+    pub total_num_f32_values: usize,
+    pub cells: Vec<Vec<GridCell>>,
+}
+
 /// GridBuffer format.
+///
+/// Use `simd` to compress the `u64_data`.
 #[derive(Clone)]
 pub struct GridBuffer {
     version: u8,
@@ -210,30 +249,33 @@ impl GridBuffer {
     }
 
     /// Get u64 values from the cell of grid buffer.
+    ///
+    /// For better ease of use, return the slice of `u64_data` directly. If the data is not exists,
+    /// return empty slice.
     #[inline]
-    pub fn get_u64_values(&self, row: usize, col: usize) -> Option<&[u64]> {
+    pub fn get_u64_values(&self, row: usize, col: usize) -> &[u64] {
         if unlikely(row >= self.num_rows || col >= self.num_cols) {
             error!("out of bounds, row: {}, col: {}", row.clone(), col.clone());
-            return None;
+            return &[];
         }
 
         match &self.cells[row][col] {
-            GridCell::U64Cell(cell) => Some(&self.u64_data[cell.range.clone()]),
-            _ => None,
+            GridCell::U64Cell(cell) => &self.u64_data[cell.range.clone()],
+            _ => &[],
         }
     }
 
     /// Get f32 values from the cell of grid buffer.
     #[inline]
-    pub fn get_f32_values(&self, row: usize, col: usize) -> Option<&[f32]> {
+    pub fn get_f32_values(&self, row: usize, col: usize) -> &[f32] {
         if unlikely(row >= self.num_rows || col >= self.num_cols) {
             error!("out of bounds, row: {}, col: {}", row.clone(), col.clone());
-            return None;
+            return &[];
         }
 
         match &self.cells[row][col] {
-            GridCell::F32Cell(cell) => Some(&self.f32_data[cell.range.clone()]),
-            _ => None,
+            GridCell::F32Cell(cell) => &self.f32_data[cell.range.clone()],
+            _ => &[],
         }
     }
 
@@ -282,29 +324,17 @@ impl GridBuffer {
     ///          data_type: u8
     ///          range.start: usize
     ///          range.end: usize
-    /// 7. compressed_u64_total_num_bytes: usize
-    /// 8. num_bits: u8
-    /// 9. compressed u64 bytes
-    /// 10. compressed_f32_total_num_bytes: usize
-    /// 11. num_bits: u8
-    /// 12. compressed f32 bytes
+    /// 7. compression_type: u8
+    /// 8. compressed_u64_total_num_bytes: usize
+    /// 9. num_bits: u8
+    /// 10. compressed u64 bytes
+    /// 11. compresson_type: u8
+    /// 12. compressed_f32_total_num_bytes: usize
+    /// 14. compressed f32 bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.estimated_bytes());
 
-        // version
-        self.push_u8_le(self.version, &mut buf);
-
-        // num_rows, num_cols
-        // Store as u32.
-        self.push_usize_le(self.num_rows, &mut buf);
-        self.push_usize_le(self.num_cols, &mut buf);
-
-        // total_num_u64_values, total_num_f32_values
-        self.push_usize_le(self.total_num_u64_values(), &mut buf);
-        self.push_usize_le(self.total_num_f32_values(), &mut buf);
-
-        // Cells.
-        self.cells_to_bytes(&mut buf);
+        self.serialize_basic_info(&mut buf);
 
         // Compressed u64 data.
         self.u64_data_to_bytes(&mut buf);
@@ -313,6 +343,49 @@ impl GridBuffer {
         self.f32_data_to_bytes(&mut buf);
 
         buf
+    }
+
+    /// Using differential coding to compress the u64 data.
+    ///
+    /// The u64 data is sorted before compression. To avoid `malloc` to store the sorted data,
+    /// we pass a new parameter `U32Sorter` to reuse the memory.
+    pub fn to_bytes_with_sorted(&self, sorter: &mut U32Sorter) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(self.estimated_bytes());
+
+        // Serialize basic info.
+        self.serialize_basic_info(&mut buf);
+
+        // Compressed u64 data.
+        self.u64_data_to_bytes_with_sorted(&mut buf, sorter);
+
+        // Compressed f32 data.
+        self.f32_data_to_bytes(&mut buf);
+
+        buf
+    }
+
+    /// Serialize basic info of the grid buffer, including:
+    /// 1. version: u8
+    /// 2. num_rows: usize
+    /// 3. num_cols: usize
+    /// 4. total_num_u64_values: usize
+    /// 5. total_num_f32_values: usize
+    /// 6. cells: Vec<Vec<GridCell>>
+    pub fn serialize_basic_info(&self, buf: &mut Vec<u8>) {
+        // version
+        self.push_u8_le(self.version, buf);
+
+        // num_rows, num_cols
+        // Store as u32.
+        self.push_usize_le(self.num_rows, buf);
+        self.push_usize_le(self.num_cols, buf);
+
+        // total_num_u64_values, total_num_f32_values
+        self.push_usize_le(self.total_num_u64_values(), buf);
+        self.push_usize_le(self.total_num_f32_values(), buf);
+
+        // Cells.
+        self.cells_to_bytes(buf);
     }
 
     /// Cells to bytes.
@@ -333,20 +406,54 @@ impl GridBuffer {
     }
 
     /// U64 data to bytes.
-    #[inline]
     fn u64_data_to_bytes(&self, buf: &mut Vec<u8>) {
         let compressed_u64_data = self.compress_u64_data(self.u64_data.as_slice());
 
+        self.push_u8_le(CompressionType::BitPacking4x as u8, buf);
         self.push_usize_le(compressed_u64_data.len(), buf);
+
         buf.extend_from_slice(compressed_u64_data.as_slice());
     }
 
+    /// U64 data to bytes with differential coding.
+    ///
+    /// First we build the u64 index for each u64 value, which is the position in the original `u64_data`.
+    /// Then we use the `compress_u64_data_with_bitpacking4x_sorted` to compress the u64 data.
+    /// And use `BitPacking4x` to compress the index. Then we store both the compressed u64 data and
+    /// the compressed index in bytes.
+    fn u64_data_to_bytes_with_sorted(&self, buf: &mut Vec<u8>, sorter: &mut U32Sorter) {
+        // Align to u32.
+        let (prefix, middle, suffix) = unsafe { self.u64_data.align_to::<u32>() };
+
+        sorter.sort(middle);
+
+        let compressed_data = self.compress_u64_data_with_bitpacking4x_sorted(sorter.data());
+        let compressed_index = self.compress_u32_data(sorter.indexes());
+
+        // Store the compression type.
+        self.push_u8_le(CompressionType::BitPacking4xDiffCoding as u8, buf);
+
+        // The data and index is seperated.
+        // Store the length of compressed u64 data.
+        self.push_usize_le(compressed_data.len(), buf);
+
+        // Store the compressed u64 data.
+        buf.extend_from_slice(compressed_data.as_slice());
+
+        // Store the length of compressed u64 index.
+        self.push_usize_le(compressed_index.len(), buf);
+
+        // Store the compressed u64 index.
+        buf.extend_from_slice(compressed_index.as_slice());
+    }
+
     /// F32 data to bytes.
-    #[inline]
     fn f32_data_to_bytes(&self, buf: &mut Vec<u8>) {
         let compressed_f32_data = self.compress_f32_data(self.f32_data.as_slice());
 
+        self.push_u8_le(CompressionType::None as u8, buf);
         self.push_usize_le(compressed_f32_data.len(), buf);
+
         buf.extend_from_slice(compressed_f32_data);
     }
 
@@ -429,66 +536,239 @@ impl GridBuffer {
         // compressed_u64_data_len.
         let usize_size = 4;
 
+        let compression_type = match CompressionType::from_repr(bytes[start_pos]) {
+            Some(compression_type) => compression_type,
+            None => {
+                error_bail!("invalid compression type: {}", bytes[start_pos]);
+            }
+        };
+
+        match compression_type {
+            CompressionType::None => Self::parse_u64_data_without_compression(
+                bytes,
+                start_pos + 1,
+                total_num_u64_values,
+            ),
+            CompressionType::BitPacking4x => Self::parse_u64_data_with_bitpacking4x(
+                bytes,
+                start_pos + 1,
+                total_num_u64_values,
+            ),
+            CompressionType::BitPacking4xDiffCoding => Self::parse_u64_data_with_bitpacking4x_sorted(
+                bytes,
+                start_pos + 1,
+                total_num_u64_values,
+            ),
+            _ => {
+                error_bail!(
+                    "unsupported compression_type: {}",
+                    compression_type.to_string()
+                );
+            }
+        }
+    }
+
+    /// Parse u64 data without compression.
+    fn parse_u64_data_without_compression(
+        bytes: &[u8],
+        start_pos: usize,
+        total_num_u64_values: usize,
+    ) -> Result<(Vec<u64>, usize)> {
         let mut pos = start_pos;
 
-        let compressed_u64_data_len = Self::parse_usize_le_unchecked(bytes, pos);
-        let u64_end = pos + usize_size + compressed_u64_data_len;
+        let compressed_data_len = Self::parse_usize_le_unchecked(bytes, pos);
+        pos += 4;
 
-        let mut u32_data = vec![0u32; compressed_u64_data_len / 4];
+        let u8_data = bytes[pos..pos + compressed_data_len].to_vec();
 
+        let (prefix, middle, suffix) = unsafe { u8_data.align_to::<u64>() };
+        check_alignment_result(prefix.len(), suffix.len())?;
+
+        check_data_length(middle.len(), total_num_u64_values)?;
+
+        Ok((middle.to_vec(), pos + compressed_data_len))
+    }
+
+    /// Parse u32 data with bitpacking.
+    fn parse_u32_data_with_bitpacking<T: BitPacker>(
+        bytes: &[u8],
+        start_pos: usize,
+        compressed_data_len: usize,
+        total_num_u32_values: usize,
+        is_sorted: bool,
+    ) -> Result<(Vec<u32>, usize)> {
+        // usize_size, fixed as 4.
+        let usize_size = 4;
+
+        // pos in bytes.
+        let mut pos = start_pos;
+
+        // end position of `u64_data` compressed in bytes.
+        let u32_end = pos + compressed_data_len;
+
+        // decompressed u32 data.
+        let mut u32_data = vec![0u32; compressed_data_len / 4];
+
+        // position in `u32_data`.
         let mut u32_pos = 0;
+
+        // length of `u32_data`.
         let mut total_u32_len = 0;
 
-        // num_bits.
-        pos += usize_size;
+        if compressed_data_len > 0 {
+            while pos < u32_end {
+                let len = Self::parse_usize_le_unchecked(bytes, pos);
+                pos += FOUR;
 
-        while pos < u64_end {
-            let len = Self::parse_usize_le_unchecked(bytes, pos);
-            pos += usize_size;
+                let num_bits = bytes[pos];
+                pos += 1;
 
-            let num_bits = bytes[pos];
-            pos += 1;
-
-            if num_bits > 0 {
-                // Use `simd` to decompress.
-                decompress_bitpacker4x(
-                    &bytes[pos..pos + len],
-                    num_bits,
-                    &mut u32_data[u32_pos..u32_pos + BitPacker4x::BLOCK_LEN],
-                );
-
-                u32_pos += BitPacker4x::BLOCK_LEN;
-                pos += len;
-                total_u32_len += BitPacker4x::BLOCK_LEN;
-            } else {
-                // No decompression. Just copy the data.
-                //
-                // If we use `bytes[pos..pos + len].align_to::<u32>()`, the `prefix.len()` will be `3`,
-                // and the `suffix.len()` will be `1`. But the `len` is exactly multiple of `4`.
-                //
-                // Weird. It should be `prefix.len() == 0` and `suffix.len() == 0`.
-                // But why?
-                //
-                // TODO: Find why `bytes[pos..pos + len].align_to::<u32>()` is not working.
-                let vec = bytes[pos..pos + len].to_vec();
-                let (prefix, middle, suffix) = unsafe { vec.align_to::<u32>() };
-                u32_data[u32_pos..u32_pos + middle.len()].copy_from_slice(middle);
-
-                if unlikely(prefix.len() > 0 || suffix.len() > 0) {
-                    error_bail!(
-                        "invalid u32 data, prefix: {}, suffix: {}",
-                        prefix.len(),
-                        suffix.len()
+                if num_bits > 0 {
+                    // Use `simd` to decompress.
+                    decompress_bitpacker::<T>(
+                        &bytes[pos..pos + len],
+                        num_bits,
+                        &mut u32_data[u32_pos..u32_pos + T::BLOCK_LEN],
+                        is_sorted,
                     );
-                }
 
-                u32_pos += middle.len();
-                pos += len;
-                total_u32_len += middle.len();
+                    u32_pos += T::BLOCK_LEN;
+                    pos += len;
+                    total_u32_len += T::BLOCK_LEN;
+                } else {
+                    // No decompression. Just copy the data.
+                    //
+                    // If we use `bytes[pos..pos + len].align_to::<u32>()`, the `prefix.len()` will be `3`,
+                    // and the `suffix.len()` will be `1`. But the `len` is exactly multiple of `4`.
+                    //
+                    // Weird. It should be `prefix.len() == 0` and `suffix.len() == 0`.
+                    // But why?
+                    //
+                    // TODO: Find why `bytes[pos..pos + len].align_to::<u32>()` is not working.
+                    let vec = bytes[pos..pos + len].to_vec();
+                    let (prefix, middle, suffix) = unsafe { vec.align_to::<u32>() };
+                    u32_data[u32_pos..u32_pos + middle.len()].copy_from_slice(middle);
+
+                    if unlikely(prefix.len() > 0 || suffix.len() > 0) {
+                        error_bail!(
+                            "invalid u32 data, prefix: {}, suffix: {}",
+                            prefix.len(),
+                            suffix.len()
+                        );
+                    }
+
+                    info!("u32_pos: {}, middle.len(): {}", u32_pos, middle.len());
+
+                    u32_pos += middle.len();
+                    pos += len;
+                    total_u32_len += middle.len();
+                }
             }
         }
 
         u32_data.resize(total_u32_len, 0);
+
+        Ok((u32_data, pos))
+    }
+
+    /// Parse u32 data with bitpacking4x.
+    fn parse_u32_data_with_bitpacking4x(
+        bytes: &[u8],
+        start_pos: usize,
+        total_num_u32_values: usize,
+    ) -> Result<(Vec<u32>, usize)> {
+        let compressed_data_len = Self::parse_usize_le_unchecked(bytes, start_pos);
+
+        Self::parse_u32_data_with_bitpacking::<BitPacker4x>(
+            bytes,
+            start_pos + FOUR,
+            compressed_data_len,
+            total_num_u32_values,
+            false,
+        )
+    }
+
+    /// Parse u32 data with bitpacking4x and differential coding.
+    fn parse_u32_data_with_bitpacking4x_sorted(
+        bytes: &[u8],
+        start_pos: usize,
+        num_values: usize,
+    ) -> Result<(Vec<u32>, usize)> {
+        let compressed_data_len = Self::parse_usize_le_unchecked(bytes, start_pos);
+
+        let (mut u32_data, pos) = Self::parse_u32_data_with_bitpacking::<BitPacker4x>(
+            bytes,
+            start_pos + FOUR,
+            compressed_data_len,
+            num_values,
+            false,
+        )?;
+
+        let compressed_index_len = Self::parse_usize_le_unchecked(bytes, pos);
+
+        let (mut u32_index, pos) = Self::parse_u32_data_with_bitpacking::<BitPacker4x>(
+            bytes,
+            pos + FOUR,
+            compressed_index_len,
+            num_values,
+            true,
+        )?;
+
+        U32Sorter::sort_by_index(u32_data.as_mut_slice(), u32_index.as_mut_slice());
+
+        Ok((u32_data, pos))
+    }
+
+    /// Parse u64 data with bitpacking.
+    fn parse_u64_data_with_bitpacking<T: BitPacker>(
+        bytes: &[u8],
+        start_pos: usize,
+        num_values: usize,
+        is_sorted: bool,
+    ) -> Result<(Vec<u64>, usize)> {
+        let compressed_data_len = Self::parse_usize_le_unchecked(bytes, start_pos);
+
+        let (u32_data, pos) = Self::parse_u32_data_with_bitpacking::<T>(
+            bytes,
+            start_pos + FOUR,
+            compressed_data_len,
+            num_values * 2,
+            is_sorted,
+        )?;
+
+        let u64_data = Self::align_to_u64(u32_data.as_slice())?;
+
+        Ok((u64_data, pos))
+    }
+
+    /// Parse u64 data with bitpacking4x.
+    #[inline]
+    fn parse_u64_data_with_bitpacking4x(
+        bytes: &[u8],
+        start_pos: usize,
+        num_values: usize,
+    ) -> Result<(Vec<u64>, usize)> {
+        Self::parse_u64_data_with_bitpacking::<BitPacker4x>(
+            bytes,
+            start_pos,
+            num_values,
+            false,
+        )
+    }
+
+    /// Parse u64 data with bitpacking4x and differential coding.
+    /// 
+    /// TODO: redundant with `Self::parse_u64_data_with_bitpacking4x`. Need merge.
+    fn parse_u64_data_with_bitpacking4x_sorted(
+        bytes: &[u8],
+        start_pos: usize,
+        num_values: usize,
+    ) -> Result<(Vec<u64>, usize)> {
+        let (u32_data, pos) = Self::parse_u32_data_with_bitpacking4x_sorted(
+            bytes,
+            start_pos,
+            num_values * 2,
+        )?;
 
         let u64_data = Self::align_to_u64(u32_data.as_slice())?;
 
@@ -520,13 +800,21 @@ impl GridBuffer {
         start_pos: usize,
         total_num_f32_values: usize,
     ) -> Result<(Vec<f32>, usize)> {
-        let usize_size = 4;
-
         let mut pos = start_pos;
+
+        let compression_type = match CompressionType::from_repr(bytes[pos]) {
+            Some(compression_type) => compression_type,
+            None => {
+                error_bail!("invalid compression type: {}", bytes[pos]);
+            }
+        };
+        pos += 1;
+
+        check_compression_type(compression_type, CompressionType::None)?;
 
         // f32 data.
         let compressed_f32_data_len = Self::parse_usize_le_unchecked(bytes, pos);
-        pos += usize_size;
+        pos += FOUR;
 
         let f32_data_start = pos;
         let f32_data_end = pos + compressed_f32_data_len;
@@ -552,6 +840,51 @@ impl GridBuffer {
 
     /// Deserialize the GridBuffer from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let (basic_info, pos) = Self::parse_basic_info(bytes)?;
+
+        let (u64_data, pos) = Self::parse_u64_data(bytes, pos, basic_info.total_num_u64_values)?;
+        check_data_length(u64_data.len(), basic_info.total_num_u64_values)?;
+
+        let (f32_data, pos) = Self::parse_f32_data(bytes, pos, basic_info.total_num_f32_values)?;
+        check_data_length(f32_data.len(), basic_info.total_num_f32_values)?;
+
+        Ok(GridBuffer::new_with_fields(
+            basic_info.num_rows,
+            basic_info.num_cols,
+            u64_data,
+            f32_data,
+            basic_info.cells,
+        ))
+    }
+
+    /// Serialize the GridBuffer to base64.
+    pub fn to_base64(&self) -> String {
+        let bytes = self.to_bytes();
+        base64::encode(&bytes)
+    }
+
+    /// Serialize the GridBuffer to bytes with sorted, then to base64.
+    pub fn to_base64_with_sorted(&self, sorter: &mut U32Sorter) -> String {
+        let bytes = self.to_bytes_with_sorted(sorter);
+        base64::encode(&bytes)
+    }
+
+    /// Deserialize the GridBuffer from base64.
+    pub fn from_base64(base64: &str) -> Result<Self> {
+        let bytes = base64::decode(base64)?;
+        Self::from_bytes(&bytes)
+    }
+
+    /// Helper method to push a `usize` as little-endian bytes
+    ///
+    /// Store as u32.
+    #[inline]
+    fn push_usize_le(&self, value: usize, buffer: &mut Vec<u8>) {
+        buffer.extend_from_slice(&(value as u32).to_le_bytes());
+    }
+
+    /// Parse basic info from bytes.
+    fn parse_basic_info(bytes: &[u8]) -> Result<(GridBasicInfo, usize)> {
         // version
         let version = bytes[0];
 
@@ -571,35 +904,16 @@ impl GridBuffer {
             total_num_f32_values,
         )?;
 
-        let (u64_data, pos) = Self::parse_u64_data(bytes, pos, total_num_u64_values)?;
-        check_data_length(u64_data.len(), total_num_u64_values)?;
+        let basic_info = GridBasicInfo {
+            version,
+            num_rows,
+            num_cols,
+            total_num_u64_values,
+            total_num_f32_values,
+            cells,
+        };
 
-        let (f32_data, pos) = Self::parse_f32_data(bytes, pos, total_num_f32_values)?;
-        check_data_length(f32_data.len(), total_num_f32_values)?;
-
-        Ok(GridBuffer::new_with_fields(
-            num_rows, num_cols, u64_data, f32_data, cells,
-        ))
-    }
-
-    /// Serialize the GridBuffer to base64.
-    pub fn to_base64(&self) -> String {
-        let bytes = self.to_bytes();
-        base64::encode(&bytes)
-    }
-
-    /// Deserialize the GridBuffer from base64.
-    pub fn from_base64(base64: &str) -> Result<Self> {
-        let bytes = base64::decode(base64)?;
-        Self::from_bytes(&bytes)
-    }
-
-    /// Helper method to push a `usize` as little-endian bytes
-    ///
-    /// Store as u32.
-    #[inline]
-    fn push_usize_le(&self, value: usize, buffer: &mut Vec<u8>) {
-        buffer.extend_from_slice(&(value as u32).to_le_bytes());
+        Ok((basic_info, pos))
     }
 
     /// Parse u32 from little-endian bytes.
@@ -628,6 +942,16 @@ impl GridBuffer {
         let (prefix, middle, suffix) = unsafe { data.align_to::<u32>() };
 
         compress_bitpacker4x(middle)
+    }
+
+    #[inline]
+    fn compress_u32_data(&self, data: &[u32]) -> Vec<u8> {
+        compress_bitpacker4x(data)
+    }
+
+    /// Compress u64 data with bitpacking4x and differential coding.
+    fn compress_u64_data_with_bitpacking4x_sorted(&self, data: &[u32]) -> Vec<u8> {
+        compress_bitpacker4x_sorted(data)
     }
 
     /// Compress f32 in the future.
@@ -755,8 +1079,8 @@ mod tests {
         buffer.push_u64_values(0, 0, &u64_values);
         buffer.push_f32_values(1, 1, &f32_values);
 
-        assert_eq!(buffer.get_u64_values(0, 0), Some(u64_values.as_slice()));
-        assert_eq!(buffer.get_f32_values(1, 1), Some(f32_values.as_slice()));
+        assert_eq!(buffer.get_u64_values(0, 0), u64_values.as_slice());
+        assert_eq!(buffer.get_f32_values(1, 1), f32_values.as_slice());
         assert_eq!(buffer.total_num_u64_values(), 3);
         assert_eq!(buffer.total_num_f32_values(), 3);
     }
@@ -777,8 +1101,8 @@ mod tests {
         buffer.push_f32_values(0, 1, &f32_values);
         buffer.push_f32_values(1, 0, &f32_values2);
 
-        assert_eq!(buffer.get_f32_values(0, 1), Some(f32_values.as_slice()));
-        assert_eq!(buffer.get_f32_values(1, 0), Some(f32_values2.as_slice()));
+        assert_eq!(buffer.get_f32_values(0, 1), f32_values.as_slice());
+        assert_eq!(buffer.get_f32_values(1, 0), f32_values2.as_slice());
         assert_eq!(buffer.total_num_f32_values(), 5);
     }
 
@@ -812,13 +1136,13 @@ mod tests {
     #[test]
     fn test_gridbuffer_out_of_bounds_row() {
         let buffer = GridBuffer::new(2, 2, 500);
-        assert_eq!(buffer.get_u64_values(2, 0), None);
+        assert_eq!(buffer.get_u64_values(2, 0), &[]);
     }
 
     #[test]
     fn test_gridbuffer_out_of_bounds_col() {
         let buffer = GridBuffer::new(2, 2, 500);
-        assert_eq!(buffer.get_f32_values(0, 2), None);
+        assert_eq!(buffer.get_f32_values(0, 2), &[]);
     }
 
     #[test]
@@ -848,18 +1172,12 @@ mod tests {
         assert_eq!(restored_buffer.num_rows(), num_rows);
         assert_eq!(restored_buffer.num_cols(), num_cols);
 
-        assert_eq!(
-            restored_buffer.get_u64_values(0, 0),
-            Some(u64_values.as_slice())
-        );
-        assert_eq!(
-            restored_buffer.get_f32_values(1, 1),
-            Some(f32_values.as_slice())
-        );
+        assert_eq!(restored_buffer.get_u64_values(0, 0), u64_values.as_slice());
+        assert_eq!(restored_buffer.get_f32_values(1, 1), f32_values.as_slice());
 
         // Check if empty cells are still empty
-        assert_eq!(restored_buffer.get_u64_values(0, 1), None);
-        assert_eq!(restored_buffer.get_f32_values(1, 0), None);
+        assert_eq!(restored_buffer.get_u64_values(0, 1), &[]);
+        assert_eq!(restored_buffer.get_f32_values(1, 0), &[]);
 
         // Check total number of values
         assert_eq!(restored_buffer.total_num_u64_values(), 3);
@@ -873,6 +1191,70 @@ mod tests {
         let buffer = GridBuffer::new(2, 2, 500);
 
         let bytes = buffer.to_bytes();
+
+        let restored_buffer = GridBuffer::from_bytes(&bytes).unwrap();
+
+        assert_eq!(restored_buffer.num_rows(), 2);
+        assert_eq!(restored_buffer.num_cols(), 2);
+        assert_eq!(restored_buffer.total_num_u64_values(), 0);
+        assert_eq!(restored_buffer.total_num_f32_values(), 0);
+    }
+
+    #[test]
+    fn test_gridbuffer_to_bytes_sorted_and_from_bytes_sorted() {
+        setup_log();
+
+        let mut sorter = U32Sorter::new();
+
+        let num_rows = 2;
+        let num_cols = 2;
+        let capacity = 500;
+
+        let mut buffer = GridBuffer::new(num_rows, num_cols, capacity);
+
+        // Add some u64 values in unsorted order
+        let u64_values = vec![100, 1, 50, 2];
+        buffer.push_u64_values(0, 0, &u64_values);
+
+        // Add some f32 values
+        let f32_values = vec![1.0, 2.0, 3.0];
+        buffer.push_f32_values(1, 1, &f32_values);
+
+        // Convert to bytes using sorted method
+        let bytes = buffer.to_bytes_with_sorted(&mut sorter);
+
+        // Create a new GridBuffer from the sorted bytes
+        let restored_buffer = GridBuffer::from_bytes(&bytes).unwrap();
+
+        // Check if the restored buffer matches the original
+        assert_eq!(restored_buffer.num_rows(), num_rows);
+        assert_eq!(restored_buffer.num_cols(), num_cols);
+
+        // Check if the u64 values are correctly restored (should be sorted)
+        let restored_u64_values = restored_buffer.get_u64_values(0, 0);
+        assert_eq!(restored_u64_values, &[100, 1, 50, 2]);
+
+        // Check if the f32 values are correctly restored
+        assert_eq!(restored_buffer.get_f32_values(1, 1), f32_values.as_slice());
+
+        // Check if empty cells are still empty
+        assert_eq!(restored_buffer.get_u64_values(0, 1), &[]);
+        assert_eq!(restored_buffer.get_f32_values(1, 0), &[]);
+
+        // Check total number of values
+        assert_eq!(restored_buffer.total_num_u64_values(), 4);
+        assert_eq!(restored_buffer.total_num_f32_values(), 3);
+    }
+
+    #[test]
+    fn test_gridbuffer_to_bytes_sorted_empty() {
+        setup_log();
+
+        let buffer = GridBuffer::new(2, 2, 500);
+
+        let mut sorter = U32Sorter::new();
+
+        let bytes = buffer.to_bytes_with_sorted(&mut sorter);
 
         let restored_buffer = GridBuffer::from_bytes(&bytes).unwrap();
 
