@@ -12,7 +12,7 @@ use bitpacking::BitPacker4x;
 use bitpacking::BitPacker8x;
 
 /// Compress the data using SIMD.
-pub fn compress_bitpacker<T: BitPacker>(bitpacker: &T, is_sorted: bool, data: &[u32]) -> Vec<u8> {
+pub fn compress_bitpacker_impl<T: BitPacker>(bitpacker: &T, is_sorted: bool, data: &[u32]) -> Vec<u8> {
     let block_len = T::BLOCK_LEN;
 
     // Need to store other info, such as length of each block.
@@ -34,6 +34,8 @@ pub fn compress_bitpacker<T: BitPacker>(bitpacker: &T, is_sorted: bool, data: &[
             break;
         }
 
+        // If all values in the block are 0, we don't need to compress it.
+        // But the `num_bits` and `compressed_len` will be `0`. Need to handle when decompressing.
         let block = &data[offset..offset + block_len];
         let num_bits = bitpacker.num_bits(block);
 
@@ -82,19 +84,43 @@ pub fn compress_bitpacker<T: BitPacker>(bitpacker: &T, is_sorted: bool, data: &[
     compressed
 }
 
-/// Compress the data using SIMD.
+/// Compress the data using SIMD bitpacking.
+#[inline]
+pub fn compress_bitpacker<T: BitPacker>(data: &[u32]) -> Vec<u8> {
+    let bitpacker = T::new();
+    compress_bitpacker_impl(&bitpacker, false, data)
+}
+
+/// Compress the data using SIMD bitpacking4x.
+#[inline]
 pub fn compress_bitpacker4x(data: &[u32]) -> Vec<u8> {
     let bitpacker = BitPacker4x::new();
-    compress_bitpacker(&bitpacker, false, data)
+    compress_bitpacker_impl(&bitpacker, false, data)
+}
+
+/// Compress the data using SIMD bitpacking8x.
+#[inline]
+pub fn compress_bitpacker8x(data: &[u32]) -> Vec<u8> {
+    let bitpacker = BitPacker8x::new();
+    compress_bitpacker_impl(&bitpacker, false, data)
 }
 
 /// Compress the data using SIMD and differential coding.
+#[inline]
 pub fn compress_bitpacker4x_sorted(data: &[u32]) -> Vec<u8> {
     let bitpacker = BitPacker4x::new();
-    compress_bitpacker(&bitpacker, true, data)
+    compress_bitpacker_impl(&bitpacker, true, data)
+}
+
+/// Compress the data using SIMD bitpacking8x and differential coding.
+#[inline]
+pub fn compress_bitpacker8x_sorted(data: &[u32]) -> Vec<u8> {
+    let bitpacker = BitPacker8x::new();
+    compress_bitpacker_impl(&bitpacker, true, data)
 }
 
 /// Decompress the data using SIMD.
+#[inline]
 pub fn decompress_bitpacker<T: BitPacker>(
     data: &[u8],
     num_bits: u8,
@@ -110,21 +136,26 @@ pub fn decompress_bitpacker<T: BitPacker>(
     }
 }
 
+/// Decompress the data using SIMD bitpacking4x.
+#[inline]
 pub fn decompress_bitpacker4x(data: &[u8], num_bits: u8, res: &mut [u32]) -> usize {
     decompress_bitpacker::<BitPacker4x>(data, num_bits, res, false)
 }
 
-/// Decompress the data using SIMD.
+/// Decompress the data using SIMD bitpacking8x.
+#[inline]
 pub fn decompress_bitpacker8x(data: &[u8], num_bits: u8, res: &mut [u32]) -> usize {
     decompress_bitpacker::<BitPacker8x>(data, num_bits, res, false)
 }
 
 /// Decompress the data using SIMD and differential coding.
+#[inline]
 pub fn decompress_bitpacker4x_sorted(data: &[u8], num_bits: u8, res: &mut [u32]) -> usize {
     decompress_bitpacker::<BitPacker4x>(data, num_bits, res, true)
 }
 
 /// Decompress the data using SIMD and differential coding.
+#[inline]
 pub fn decompress_bitpacker8x_sorted(data: &[u8], num_bits: u8, res: &mut [u32]) -> usize {
     decompress_bitpacker::<BitPacker8x>(data, num_bits, res, true)
 }

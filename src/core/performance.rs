@@ -5,6 +5,7 @@
 //! Also the size of the serialized data is the same.
 
 use anyhow::{anyhow, bail, Result};
+use bitpacking::{BitPacker, BitPacker4x, BitPacker8x};
 use log::{error, info};
 
 use prost::Message;
@@ -12,9 +13,10 @@ use prost::Message;
 use std::io::BufWriter;
 use std::io::{BufRead, BufReader, Read, Write};
 
+use super::gridbuffer::GetCompressionType;
 use super::{gridbuffer::GridBuffer, timer::Timer};
-use crate::sniper::SimpleFeatures;
 use crate::core::tool::U32Sorter;
+use crate::sniper::SimpleFeatures;
 
 /// Parse SimpleFeatures from base64 encoded protobuf data.
 pub fn parse_simple_features(data: &str) -> Result<SimpleFeatures> {
@@ -160,6 +162,33 @@ pub fn read_simple_features_from_file(
         .map(|x| x.unwrap()))
 }
 
+/// Read GridBuffer from a file.
+pub fn read_gridbuffer_from_file(file_path: &str) -> Result<impl Iterator<Item = GridBuffer>> {
+    let file = std::fs::File::open(file_path)?;
+    let reader = BufReader::new(file);
+
+    let res = reader
+        .lines()
+        .filter(|x| match x {
+            Ok(_) => true,
+            Err(e) => {
+                error!("Read line Error: {}", e);
+                false
+            }
+        })
+        .map(|x| GridBuffer::from_base64(&x.unwrap()))
+        .filter(|x| match x {
+            Ok(_) => true,
+            Err(e) => {
+                error!("GridBuffer from base64 Error: {}", e);
+                false
+            }
+        })
+        .map(|x| x.unwrap());
+
+    Ok(res)
+}
+
 /// Time converting simple features to gridbuffer.
 pub fn time_convert_simple_features_to_gridbuffer(
     file_path: &str,
@@ -179,8 +208,8 @@ pub fn time_convert_simple_features_to_gridbuffer(
     Ok(())
 }
 
-/// Save gridbuffers to file.
-pub fn save_gridbuffers_to_file(
+/// Save gridbuffers to file using bitpacking.
+pub fn save_gridbuffers_to_file_with_bitpacking<T: BitPacker + GetCompressionType>(
     gridbuffers: impl Iterator<Item = GridBuffer>,
     file_path: &str,
     is_sorted: bool,
@@ -195,17 +224,40 @@ pub fn save_gridbuffers_to_file(
             let serialized = gridbuffer.to_base64_with_sorted(&mut sorter);
             writer.write_all(serialized.as_bytes())?;
         } else {
-            let serialized = gridbuffer.to_base64();
+            let serialized = gridbuffer.to_base64_with_bitpacking::<T>();
             writer.write_all(serialized.as_bytes())?;
         }
 
         writer.write("\n".as_bytes())?;
     }
 
+    writer.flush()?;
+
     Ok(())
 }
 
-pub fn convert_simple_features_to_gridbuffer_file(
+/// Save gridbuffers to file using bitpacking4x.
+#[inline]
+pub fn save_gridbuffers_to_file_with_bitpacking4x(
+    gridbuffers: impl Iterator<Item = GridBuffer>,
+    file_path: &str,
+    is_sorted: bool,
+) -> Result<()> {
+    save_gridbuffers_to_file_with_bitpacking::<BitPacker4x>(gridbuffers, file_path, is_sorted)
+}
+
+/// Save gridbuffers to file using bitpacking8x.
+#[inline]
+pub fn save_gridbuffers_to_file_with_bitpacking8x(
+    gridbuffers: impl Iterator<Item = GridBuffer>,
+    file_path: &str,
+    is_sorted: bool,
+) -> Result<()> {
+    save_gridbuffers_to_file_with_bitpacking::<BitPacker8x>(gridbuffers, file_path, is_sorted)
+}
+
+/// Convert simple features to gridbuffer file using bitpacking.
+pub fn convert_simple_features_to_gridbuffer_file_with_bitpacking<T: BitPacker + GetCompressionType>(
     file_path: &str,
     num_rows: usize,
     num_cols: usize,
@@ -213,27 +265,79 @@ pub fn convert_simple_features_to_gridbuffer_file(
     is_sorted: bool,
 ) -> Result<()> {
     let gridbuffers = convert_simple_features_to_gridbuffer(file_path, num_rows, num_cols)?;
-    save_gridbuffers_to_file(gridbuffers, res_file_path, is_sorted)?;
+    save_gridbuffers_to_file_with_bitpacking::<T>(gridbuffers, res_file_path, is_sorted)?;
 
     Ok(())
 }
 
+/// Convert simple features to gridbuffer file using bitpacking4x.
+#[inline]
+pub fn convert_simple_features_to_gridbuffer_file_with_bitpacking4x(
+    file_path: &str,
+    num_rows: usize,
+    num_cols: usize,
+    res_file_path: &str,
+    is_sorted: bool,
+) -> Result<()> {
+    convert_simple_features_to_gridbuffer_file_with_bitpacking::<BitPacker4x>(
+        file_path,
+        num_rows,
+        num_cols,
+        res_file_path,
+        is_sorted,
+    )
+}
+
+/// Convert simple features to gridbuffer file using bitpacking8x.
+#[inline]
+pub fn convert_simple_features_to_gridbuffer_file_with_bitpacking8x(
+    file_path: &str,
+    num_rows: usize,
+    num_cols: usize,
+    res_file_path: &str,
+    is_sorted: bool,
+) -> Result<()> {
+    convert_simple_features_to_gridbuffer_file_with_bitpacking::<BitPacker8x>(
+        file_path,
+        num_rows,
+        num_cols,
+        res_file_path,
+        is_sorted,
+    )
+}
+
+/// Convert simple features to gridbuffer file without sorting.
+#[inline]
 pub fn convert_simple_features_to_gridbuffer_file_without_sorted(
     file_path: &str,
     num_rows: usize,
     num_cols: usize,
     res_file_path: &str,
 ) -> Result<()> {
-    convert_simple_features_to_gridbuffer_file(file_path, num_rows, num_cols, res_file_path, false)
+    convert_simple_features_to_gridbuffer_file_with_bitpacking::<BitPacker4x>(
+        file_path,
+        num_rows,
+        num_cols,
+        res_file_path,
+        false,
+    )
 }
 
+/// Convert simple features to gridbuffer file with sorting.
+#[inline]
 pub fn convert_simple_features_to_gridbuffer_file_with_sorted(
     file_path: &str,
     num_rows: usize,
     num_cols: usize,
     res_file_path: &str,
 ) -> Result<()> {
-    convert_simple_features_to_gridbuffer_file(file_path, num_rows, num_cols, res_file_path, true)
+    convert_simple_features_to_gridbuffer_file_with_bitpacking::<BitPacker4x>(
+        file_path,
+        num_rows,
+        num_cols,
+        res_file_path,
+        true,
+    )
 }
 
 /// Time serializing GridBuffer to bytes.

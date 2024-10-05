@@ -62,7 +62,7 @@
 use core::simd::prelude::*;
 
 use anyhow::{bail, Result};
-use bitpacking::BitPacker4x;
+use bitpacking::{BitPacker4x, BitPacker8x};
 use likely_stable::{likely, unlikely};
 use log::{error, info};
 use std::{arch::is_riscv_feature_detected, default, ops::Range};
@@ -75,7 +75,9 @@ use bitpacking::BitPacker;
 use crate::error_bail;
 
 use super::{
-    simd::{compress_bitpacker4x, compress_bitpacker4x_sorted, decompress_bitpacker, decompress_bitpacker4x},
+    simd::{
+        compress_bitpacker, compress_bitpacker4x, compress_bitpacker4x_sorted, compress_bitpacker8x, decompress_bitpacker, decompress_bitpacker4x
+    },
     tool::{check_compression_type, check_data_length, check_range, U32Sorter},
 };
 
@@ -117,6 +119,22 @@ pub enum CompressionType {
 
     /// Bit packing 4x and differential coding.
     BitPacking4xDiffCoding,
+}
+
+pub trait GetCompressionType {
+    fn get_compression_type() -> CompressionType;
+}
+
+impl GetCompressionType for BitPacker4x {
+    fn get_compression_type() -> CompressionType {
+        CompressionType::BitPacking4x
+    }
+}
+
+impl GetCompressionType for BitPacker8x {
+    fn get_compression_type() -> CompressionType {
+        CompressionType::BitPacking8x
+    }
 }
 
 pub const GRID_BUFFER_VERSION: u8 = 1;
@@ -331,18 +349,36 @@ impl GridBuffer {
     /// 11. compresson_type: u8
     /// 12. compressed_f32_total_num_bytes: usize
     /// 14. compressed f32 bytes
+    #[inline]
     pub fn to_bytes(&self) -> Vec<u8> {
+        self.to_bytes_bitpacking4x()
+    }
+
+    /// Serialize the GridBuffer to bytes with `BitPacking` compression.
+    pub fn to_bytes_with_bitpacking<T: BitPacker + GetCompressionType>(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.estimated_bytes());
 
         self.serialize_basic_info(&mut buf);
 
         // Compressed u64 data.
-        self.u64_data_to_bytes(&mut buf);
+        self.u64_data_to_bytes_bitpacking::<T>(&mut buf);
 
         // Compressed f32 data.
         self.f32_data_to_bytes(&mut buf);
 
         buf
+    }
+
+    /// Serialize the GridBuffer to bytes with `BitPacking4x` compression.
+    #[inline]
+    pub fn to_bytes_bitpacking4x(&self) -> Vec<u8> {
+        self.to_bytes_with_bitpacking::<BitPacker4x>()
+    }
+
+    /// Serialize the GridBuffer to bytes with `BitPacking8x` compression.
+    #[inline]
+    pub fn to_bytes_bitpacking8x(&self) -> Vec<u8> {
+        self.to_bytes_with_bitpacking::<BitPacker8x>()
     }
 
     /// Using differential coding to compress the u64 data.
@@ -405,14 +441,24 @@ impl GridBuffer {
         }
     }
 
-    /// U64 data to bytes.
-    fn u64_data_to_bytes(&self, buf: &mut Vec<u8>) {
-        let compressed_u64_data = self.compress_u64_data(self.u64_data.as_slice());
+    /// U64 data to bytes using `BitPacking`.
+    fn u64_data_to_bytes_bitpacking<T: BitPacker + GetCompressionType>(&self, buf: &mut Vec<u8>) {
+        let compressed_u64_data = self.compress_u64_data_bitpacking::<T>(self.u64_data.as_slice());
 
-        self.push_u8_le(CompressionType::BitPacking4x as u8, buf);
+        self.push_u8_le(T::get_compression_type() as u8, buf);
         self.push_usize_le(compressed_u64_data.len(), buf);
 
         buf.extend_from_slice(compressed_u64_data.as_slice());
+    }
+
+    /// U64 data to bytes using `BitPacking4x`.
+    fn u64_data_to_bytes_bitpacking4x(&self, buf: &mut Vec<u8>) {
+        self.u64_data_to_bytes_bitpacking::<BitPacker4x>(buf);
+    }
+
+    /// U64 data to bytes using `BitPacking8x`.
+    fn u64_data_to_bytes_bitpacking8x(&self, buf: &mut Vec<u8>) {
+        self.u64_data_to_bytes_bitpacking::<BitPacker8x>(buf);
     }
 
     /// U64 data to bytes with differential coding.
@@ -544,21 +590,22 @@ impl GridBuffer {
         };
 
         match compression_type {
-            CompressionType::None => Self::parse_u64_data_without_compression(
-                bytes,
-                start_pos + 1,
-                total_num_u64_values,
-            ),
-            CompressionType::BitPacking4x => Self::parse_u64_data_with_bitpacking4x(
-                bytes,
-                start_pos + 1,
-                total_num_u64_values,
-            ),
-            CompressionType::BitPacking4xDiffCoding => Self::parse_u64_data_with_bitpacking4x_sorted(
-                bytes,
-                start_pos + 1,
-                total_num_u64_values,
-            ),
+            CompressionType::None => {
+                Self::parse_u64_data_without_compression(bytes, start_pos + 1, total_num_u64_values)
+            }
+            CompressionType::BitPacking4x => {
+                Self::parse_u64_data_with_bitpacking4x(bytes, start_pos + 1, total_num_u64_values)
+            }
+            CompressionType::BitPacking8x => {
+                Self::parse_u64_data_with_bitpacking8x(bytes, start_pos + 1, total_num_u64_values)
+            }
+            CompressionType::BitPacking4xDiffCoding => {
+                Self::parse_u64_data_with_bitpacking4x_sorted(
+                    bytes,
+                    start_pos + 1,
+                    total_num_u64_values,
+                )
+            }
             _ => {
                 error_bail!(
                     "unsupported compression_type: {}",
@@ -590,7 +637,7 @@ impl GridBuffer {
     }
 
     /// Parse u32 data with bitpacking.
-    fn parse_u32_data_with_bitpacking<T: BitPacker>(
+    fn parse_u32_data_with_bitpacking<T: BitPacker + GetCompressionType>(
         bytes: &[u8],
         start_pos: usize,
         compressed_data_len: usize,
@@ -607,7 +654,7 @@ impl GridBuffer {
         let u32_end = pos + compressed_data_len;
 
         // decompressed u32 data.
-        let mut u32_data = vec![0u32; compressed_data_len / 4];
+        let mut u32_data = vec![0u32; total_num_u32_values];
 
         // position in `u32_data`.
         let mut u32_pos = 0;
@@ -623,7 +670,15 @@ impl GridBuffer {
                 let num_bits = bytes[pos];
                 pos += 1;
 
-                if num_bits > 0 {
+                // Be careful of the `num_bits == 0 && len == 0` case.
+                //
+                // We use `num_bits` and `len` to determine if the data is empty.
+                //
+                // If `num_bits` and `len` are both `0`, the data is empty. We need to fill the data with `0`.
+                // But if `num_bits` is `0` and `len` is not `0`, the data is not compressed. We just copy the data.
+                //
+                // TODO: rewrite the logic to make it more clear. Maybe using an `enum` to represent the different cases.
+                if num_bits > 0 && len > 0 {
                     // Use `simd` to decompress.
                     decompress_bitpacker::<T>(
                         &bytes[pos..pos + len],
@@ -634,6 +689,13 @@ impl GridBuffer {
 
                     u32_pos += T::BLOCK_LEN;
                     pos += len;
+                    total_u32_len += T::BLOCK_LEN;
+                } else if num_bits == 0 && len == 0 {
+                    // The data is all empty, but is compressed using `bitpacking`. So the `num_bits` and `len` are both `0`.
+                    u32_data[u32_pos..u32_pos + T::BLOCK_LEN].fill(0);
+
+                    u32_pos += T::BLOCK_LEN;
+                    pos += 0;
                     total_u32_len += T::BLOCK_LEN;
                 } else {
                     // No decompression. Just copy the data.
@@ -656,8 +718,6 @@ impl GridBuffer {
                             suffix.len()
                         );
                     }
-
-                    info!("u32_pos: {}, middle.len(): {}", u32_pos, middle.len());
 
                     u32_pos += middle.len();
                     pos += len;
@@ -720,7 +780,7 @@ impl GridBuffer {
     }
 
     /// Parse u64 data with bitpacking.
-    fn parse_u64_data_with_bitpacking<T: BitPacker>(
+    fn parse_u64_data_with_bitpacking<T: BitPacker + GetCompressionType>(
         bytes: &[u8],
         start_pos: usize,
         num_values: usize,
@@ -748,27 +808,29 @@ impl GridBuffer {
         start_pos: usize,
         num_values: usize,
     ) -> Result<(Vec<u64>, usize)> {
-        Self::parse_u64_data_with_bitpacking::<BitPacker4x>(
-            bytes,
-            start_pos,
-            num_values,
-            false,
-        )
+        Self::parse_u64_data_with_bitpacking::<BitPacker4x>(bytes, start_pos, num_values, false)
+    }
+
+    /// Parse u64 data with bitpacking8x.
+    #[inline]
+    fn parse_u64_data_with_bitpacking8x(
+        bytes: &[u8],
+        start_pos: usize,
+        num_values: usize,
+    ) -> Result<(Vec<u64>, usize)> {
+        Self::parse_u64_data_with_bitpacking::<BitPacker8x>(bytes, start_pos, num_values, false)
     }
 
     /// Parse u64 data with bitpacking4x and differential coding.
-    /// 
+    ///
     /// TODO: redundant with `Self::parse_u64_data_with_bitpacking4x`. Need merge.
     fn parse_u64_data_with_bitpacking4x_sorted(
         bytes: &[u8],
         start_pos: usize,
         num_values: usize,
     ) -> Result<(Vec<u64>, usize)> {
-        let (u32_data, pos) = Self::parse_u32_data_with_bitpacking4x_sorted(
-            bytes,
-            start_pos,
-            num_values * 2,
-        )?;
+        let (u32_data, pos) =
+            Self::parse_u32_data_with_bitpacking4x_sorted(bytes, start_pos, num_values * 2)?;
 
         let u64_data = Self::align_to_u64(u32_data.as_slice())?;
 
@@ -863,6 +925,12 @@ impl GridBuffer {
         base64::encode(&bytes)
     }
 
+    /// Serialize the GridBuffer to base64 with BitPacker.
+    pub fn to_base64_with_bitpacking<T: BitPacker + GetCompressionType>(&self) -> String {
+        let bytes = self.to_bytes_with_bitpacking::<T>();
+        base64::encode(&bytes)
+    }
+
     /// Serialize the GridBuffer to bytes with sorted, then to base64.
     pub fn to_base64_with_sorted(&self, sorter: &mut U32Sorter) -> String {
         let bytes = self.to_bytes_with_sorted(sorter);
@@ -936,12 +1004,28 @@ impl GridBuffer {
         buffer.push(value);
     }
 
-    /// Compress the u64 data.
+    /// Compress the u64 data using bitpacking.
     #[inline]
-    fn compress_u64_data(&self, data: &[u64]) -> Vec<u8> {
+    fn compress_u64_data_bitpacking<T: BitPacker + GetCompressionType>(&self, data: &[u64]) -> Vec<u8> {
+        let (prefix, middle, suffix) = unsafe { data.align_to::<u32>() };
+
+        compress_bitpacker::<T>(middle)
+    }
+
+    /// Compress the u64 data using bitpacking4x.
+    #[inline]
+    fn compress_u64_data_bitpacking4x(&self, data: &[u64]) -> Vec<u8> {
         let (prefix, middle, suffix) = unsafe { data.align_to::<u32>() };
 
         compress_bitpacker4x(middle)
+    }
+
+    /// Compress the u64 data using bitpacking8x.
+    #[inline]
+    fn compress_u64_data_bitpacking8x(&self, data: &[u64]) -> Vec<u8> {
+        let (prefix, middle, suffix) = unsafe { data.align_to::<u32>() };
+
+        compress_bitpacker8x(middle)
     }
 
     #[inline]
@@ -950,6 +1034,7 @@ impl GridBuffer {
     }
 
     /// Compress u64 data with bitpacking4x and differential coding.
+    #[inline]
     fn compress_u64_data_with_bitpacking4x_sorted(&self, data: &[u32]) -> Vec<u8> {
         compress_bitpacker4x_sorted(data)
     }

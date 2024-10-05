@@ -23,10 +23,15 @@ impl Timer {
         }
     }
 
+    /// Get time elapsed.
+    pub fn get_elapsed_micros(&self) -> u64 {
+        self.start.elapsed().as_micros()
+    }
+
     /// Print the elapsed time.
     pub fn print_elapsed(&self) {
         info!(
-            "{}, elapsed: {}us",
+            "{}, elapsed: {} us",
             self.keyword,
             self.start.elapsed().as_micros()
         );

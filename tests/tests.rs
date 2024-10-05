@@ -8,11 +8,15 @@ use bitpacking::BitPacker;
 use bitpacking::BitPacker4x;
 use bitpacking::BitPacker8x;
 
-use gridbuffer::core::performance::convert_simple_features_to_gridbuffer_file;
+use gridbuffer::core::performance::convert_simple_features_to_gridbuffer_file_with_bitpacking;
+use gridbuffer::core::performance::convert_simple_features_to_gridbuffer_file_with_bitpacking4x;
+use gridbuffer::core::performance::convert_simple_features_to_gridbuffer_file_with_bitpacking8x;
 use gridbuffer::core::performance::convert_simple_features_to_gridbuffer_file_with_sorted;
 use gridbuffer::core::performance::convert_simple_features_to_gridbuffer_file_without_sorted;
+use gridbuffer::core::performance::read_gridbuffer_from_file;
 use gridbuffer::core::performance::read_simple_features_from_file;
 use gridbuffer::core::performance::time_convert_simple_features_to_gridbuffer;
+use gridbuffer::core::timer::Timer;
 use log::info;
 
 use gridbuffer::core::tool::setup_log;
@@ -118,13 +122,37 @@ fn test_convert_simple_features_to_gridbuffer() -> Result<()> {
 }
 
 #[test]
-fn test_convert_simple_features_to_gridbuffer_file() -> Result<()> {
+fn test_convert_simple_features_to_gridbuffer_file_with_bitpacking4x() -> Result<()> {
     setup_log();
 
     let filename = "resources/simple_features_nohash_96.txt";
-    let res_filename = "resources/gridbuffers_nohash_row_16_col_81.txt";
+    let res_filename = "resources/gridbuffers_nohash_row_16_col_81_bitpacking4x.txt";
 
-    convert_simple_features_to_gridbuffer_file_without_sorted(filename, 16, 81, res_filename)?;
+    convert_simple_features_to_gridbuffer_file_with_bitpacking4x(
+        filename,
+        16,
+        81,
+        res_filename,
+        false,
+    )?;
+
+    Ok(())
+}
+
+#[test]
+fn test_convert_simple_features_to_gridbuffer_file_with_bitpacking8x() -> Result<()> {
+    setup_log();
+
+    let filename = "resources/simple_features_nohash_96.txt";
+    let res_filename = "resources/gridbuffers_nohash_row_16_col_81_bitpacking8x.txt";
+
+    convert_simple_features_to_gridbuffer_file_with_bitpacking8x(
+        filename,
+        16,
+        81,
+        res_filename,
+        false,
+    )?;
 
     Ok(())
 }
@@ -137,6 +165,101 @@ fn test_convert_simple_features_to_gridbuffer_file_with_sorted() -> Result<()> {
     let res_filename = "resources/gridbuffers_nohash_row_16_col_81_sorted.txt";
 
     convert_simple_features_to_gridbuffer_file_with_sorted(filename, 16, 81, res_filename)?;
+
+    Ok(())
+}
+
+/// Timing read simple features from file.
+#[test]
+fn timing_read_simple_features_from_file() -> Result<()> {
+    setup_log();
+
+    let loop_count = 10;
+    let mut times = Vec::with_capacity(loop_count);
+
+    let filename = "resources/simple_features_head_128.txt";
+
+    for _ in 0..loop_count {
+        let timer = Timer::new("read_simple_features_from_file".to_string());
+
+        let simple_features = read_simple_features_from_file(filename)?;
+
+        let mut count_sparse = 0;
+        for feature in simple_features {
+            count_sparse += feature.sparse_feature.len();
+        }
+
+        times.push(timer.get_elapsed_micros());
+        timer.print_elapsed();
+    }
+
+    info!(
+        "read_simple_features_from_file, loop_count: {}, times in micros: {:?}",
+        loop_count, times
+    );
+
+    Ok(())
+}
+
+/// Timing read gridbuffer from file.
+#[test]
+fn timing_read_gridbuffer_from_file_with_bitpacking4x() -> Result<()> {
+    setup_log();
+
+    let loop_count = 10;
+    let mut times = Vec::with_capacity(loop_count);
+
+    let filename = "resources/gridbuffers_nohash_row_16_col_81_bitpacking4x.txt";
+
+    for _ in 0..loop_count {
+        let timer = Timer::new("read_gridbuffer_from_file_with_bitpacking4x".to_string());
+
+        let gridbuffers = read_gridbuffer_from_file(filename)?;
+
+        let mut count = 0;
+        for gridbuffer in gridbuffers {
+            count += gridbuffer.num_cols() * gridbuffer.num_rows();
+        }
+
+        times.push(timer.get_elapsed_micros());
+        timer.print_elapsed();
+    }
+
+    info!(
+        "read_gridbuffer_from_file, loop_count: {}, times in micros: {:?}",
+        loop_count, times
+    );
+
+    Ok(())
+}
+
+#[test]
+fn timing_read_gridbuffer_from_file_with_bitpacking8x() -> Result<()> {
+    setup_log();
+
+    let loop_count = 10;
+    let mut times = Vec::with_capacity(loop_count);
+
+    let filename = "resources/gridbuffers_nohash_row_16_col_81_bitpacking8x.txt";
+
+    for _ in 0..loop_count {
+        let timer = Timer::new("read_gridbuffer_from_file_with_bitpacking8x".to_string());
+
+        let gridbuffers = read_gridbuffer_from_file(filename)?;
+
+        let mut count = 0;
+        for gridbuffer in gridbuffers {
+            count += gridbuffer.num_cols() * gridbuffer.num_rows();
+        }
+
+        times.push(timer.get_elapsed_micros());
+        timer.print_elapsed();
+    }
+
+    info!(
+        "read_gridbuffer_from_file_with_bitpacking8x, loop_count: {}, times in micros: {:?}",
+        loop_count, times
+    );
 
     Ok(())
 }
