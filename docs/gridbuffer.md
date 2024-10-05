@@ -4,7 +4,7 @@
 
 GridBuffer 是一种专门为存储广告稀疏模型使用的数据而设计的格式。
 
-GridBuffer 使用 `simd` 来加速压缩和 IO 操作。数据以列优先的方式存储。 提供类似于 `ndarray` 的接口。
+GridBuffer 使用 `simd` 来加速压缩和 IO 操作。
 
 ## 为什么要设计一种新格式
 

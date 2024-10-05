@@ -1,2 +1,4 @@
 - [简介](README.md)
 - [gridbuffer](gridbuffer.md)
+- [性能评测](performance.md)
+- [changelog](CHANGELOG.md)

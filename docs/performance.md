@@ -8,6 +8,23 @@
 
 ## 性能对比
 
+
+| 格式                     | 压缩方法              | 文件大小  | 压缩率   | 读取耗时   | 读取耗时提升 |
+|-------------------------|----------------------|----------|---------|-----------|-------------|
+| SimpleFeatures (proto)  | 无                   | 378K     | 100%    | 22000 us  | 1x          |
+| GridBuffer              | BitPacker4x          | 250K     | 66.1%   | 6000 us   | 3.67x       |
+| GridBuffer              | BitPacker4x (sorted) | 436K     | 115%    | -         | -           |
+| GridBuffer              | BitPacker8x          | 250K     | 66.1%   | 6000 us   | 3.67x       |
+
+可以看出：
+
+1. GridBuffer 使用 BitPacker4x 和 BitPacker8x 压缩效果最好，都能将文件大小压缩到原来的 66.1%。
+2. 使用排序后的 BitPacker4x 压缩反而增加了文件大小，达到原始大小的 115%，可能是因为需要额外存储索引信息。
+3. BitPacker4x 和 BitPacker8x 的压缩效果相同，这可能表明在当前数据集上，这两种方法没有明显区别。
+4. 在读取性能方面，GridBuffer 格式（无论是使用 BitPacker4x 还是 BitPacker8x）比 SimpleFeatures 格式快约 3.67 倍，耗时从 22000 us 减少到 6000 us。
+5. GridBuffer 格式不仅在大多数情况下实现了更好的压缩率，还显著提高了读取速度，展现了其在数据存储和访问方面的优势。
+
+
 ## 评测详情
 
 ### 压缩
