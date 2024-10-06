@@ -12,7 +12,11 @@ use bitpacking::BitPacker4x;
 use bitpacking::BitPacker8x;
 
 /// Compress the data using SIMD.
-pub fn compress_bitpacker_impl<T: BitPacker>(bitpacker: &T, is_sorted: bool, data: &[u32]) -> Vec<u8> {
+pub fn compress_bitpacker_impl<T: BitPacker>(
+    bitpacker: &T,
+    is_sorted: bool,
+    data: &[u32],
+) -> Vec<u8> {
     let block_len = T::BLOCK_LEN;
 
     // Need to store other info, such as length of each block.

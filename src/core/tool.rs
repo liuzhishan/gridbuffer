@@ -177,7 +177,8 @@ impl U32Sorter {
         self.indexes.clear();
         self.data.clear();
 
-        self.indexes.extend((0..data.len()).into_iter().map(|i| i as u32));
+        self.indexes
+            .extend((0..data.len()).into_iter().map(|i| i as u32));
         self.data.extend(data.iter().copied());
 
         self.indexes.sort_by_key(|&x| self.data[x as usize]);
@@ -229,5 +230,4 @@ impl U32Sorter {
 
         i
     }
-
 }

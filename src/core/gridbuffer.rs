@@ -76,7 +76,8 @@ use crate::error_bail;
 
 use super::{
     simd::{
-        compress_bitpacker, compress_bitpacker4x, compress_bitpacker4x_sorted, compress_bitpacker8x, decompress_bitpacker, decompress_bitpacker4x
+        compress_bitpacker, compress_bitpacker4x, compress_bitpacker4x_sorted,
+        compress_bitpacker8x, decompress_bitpacker, decompress_bitpacker4x,
     },
     tool::{check_compression_type, check_data_length, check_range, U32Sorter},
 };
@@ -1006,7 +1007,10 @@ impl GridBuffer {
 
     /// Compress the u64 data using bitpacking.
     #[inline]
-    fn compress_u64_data_bitpacking<T: BitPacker + GetCompressionType>(&self, data: &[u64]) -> Vec<u8> {
+    fn compress_u64_data_bitpacking<T: BitPacker + GetCompressionType>(
+        &self,
+        data: &[u64],
+    ) -> Vec<u8> {
         let (prefix, middle, suffix) = unsafe { data.align_to::<u32>() };
 
         compress_bitpacker::<T>(middle)

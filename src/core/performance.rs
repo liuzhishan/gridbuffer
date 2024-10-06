@@ -257,7 +257,9 @@ pub fn save_gridbuffers_to_file_with_bitpacking8x(
 }
 
 /// Convert simple features to gridbuffer file using bitpacking.
-pub fn convert_simple_features_to_gridbuffer_file_with_bitpacking<T: BitPacker + GetCompressionType>(
+pub fn convert_simple_features_to_gridbuffer_file_with_bitpacking<
+    T: BitPacker + GetCompressionType,
+>(
     file_path: &str,
     num_rows: usize,
     num_cols: usize,
