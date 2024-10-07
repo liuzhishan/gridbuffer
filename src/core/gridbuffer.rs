@@ -165,8 +165,24 @@ pub struct GridBuffer {
 }
 
 impl GridBuffer {
+    /// Construct an empty new grid buffer.
+    /// 
+    /// To be more flexible, we don't set the grid size here.
+    pub fn new() -> Self {
+        Self {
+            version: GRID_BUFFER_VERSION,
+            num_rows: 0,
+            num_cols: 0,
+            u64_data: vec![],
+            f32_data: vec![],
+            cells: vec![],
+        }
+    }
+
     /// Construct a new grid buffer.
-    pub fn new(num_rows: usize, num_cols: usize, capacity: usize) -> Self {
+    pub fn new_with_num_rows_cols(num_rows: usize, num_cols: usize) -> Self {
+        let capacity = num_rows * num_cols * 5;
+
         Self {
             version: GRID_BUFFER_VERSION,
             num_rows,
@@ -217,6 +233,41 @@ impl GridBuffer {
         self.num_cols
     }
 
+    #[inline]
+    pub fn set_num_cols(&mut self, num_cols: usize) {
+        self.num_cols = num_cols;
+    }
+
+    /// Set the number of rows and columns.
+    #[inline]
+    pub fn set_num_rows_cols(&mut self, num_rows: usize, num_cols: usize) {
+        self.num_rows = num_rows;
+        self.num_cols = num_cols;
+    }
+
+    /// Extend rows.
+    #[inline]
+    pub fn extend_rows(&mut self, num_rows: usize) {
+        self.num_rows += num_rows;
+        self.cells.extend(vec![vec![GridCell::default(); self.num_cols]; num_rows]);
+    }
+
+    /// Extend columns.
+    #[inline]
+    pub fn extend_cols(&mut self, num_cols: usize) {
+        self.num_cols += num_cols;
+        for row in &mut self.cells {
+            row.extend(vec![GridCell::default(); num_cols]);
+        }
+    }
+
+    /// Extend rows and columns.
+    #[inline]
+    pub fn extend_rows_cols(&mut self, num_rows: usize, num_cols: usize) {
+        self.extend_rows(num_rows);
+        self.extend_cols(num_cols);
+    }
+
     /// Push a cell into the grid buffer.
     #[inline]
     pub fn push_cell(&mut self, row: usize, col: usize, value: GridCell) {
@@ -253,6 +304,11 @@ impl GridBuffer {
         self.cells[row][col] = GridCell::U64Cell(GridCellU64 { range });
     }
 
+    #[inline]
+    pub fn push_u64(&mut self, row: usize, col: usize, value: u64) {
+        self.push_u64_values(row, col, &[value]);
+    }
+
     /// Push a f32 value into the grid buffer.
     #[inline]
     pub fn push_f32_values(&mut self, row: usize, col: usize, values: &[f32]) {
@@ -265,6 +321,11 @@ impl GridBuffer {
         let range = self.f32_data.len() - values.len()..self.f32_data.len();
 
         self.cells[row][col] = GridCell::F32Cell(GridCellF32 { range });
+    }
+
+    #[inline]
+    pub fn push_f32(&mut self, row: usize, col: usize, value: f32) {
+        self.push_f32_values(row, col, &[value]);
     }
 
     /// Get u64 values from the cell of grid buffer.
@@ -284,6 +345,25 @@ impl GridBuffer {
         }
     }
 
+    #[inline]
+    pub fn get_u64(&self, row: usize, col: usize) -> Option<u64> {
+        if unlikely(row >= self.num_rows || col >= self.num_cols) {
+            error!("out of bounds, row: {}, col: {}", row.clone(), col.clone());
+            return None;
+        }
+
+        match &self.cells[row][col] {
+            GridCell::U64Cell(cell) => {
+                if cell.range.len() == 1 {
+                    Some(self.u64_data[cell.range.start])
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Get f32 values from the cell of grid buffer.
     #[inline]
     pub fn get_f32_values(&self, row: usize, col: usize) -> &[f32] {
@@ -295,6 +375,25 @@ impl GridBuffer {
         match &self.cells[row][col] {
             GridCell::F32Cell(cell) => &self.f32_data[cell.range.clone()],
             _ => &[],
+        }
+    }
+
+    #[inline]
+    pub fn get_f32(&self, row: usize, col: usize) -> Option<f32> {
+        if unlikely(row >= self.num_rows || col >= self.num_cols) {
+            error!("out of bounds, row: {}, col: {}", row.clone(), col.clone());
+            return None;
+        }
+
+        match &self.cells[row][col] {
+            GridCell::F32Cell(cell) => {
+                if cell.range.len() == 1 {
+                    Some(self.f32_data[cell.range.start])
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
@@ -1050,6 +1149,15 @@ impl GridBuffer {
 
         middle
     }
+
+    /// Sort the rows by function by `f`.
+    fn sort_rows_by<F, T>(&mut self, f: F)
+    where
+        F: Fn(&Vec<GridCell>) -> T,
+        T: Ord,
+    {
+        self.cells.sort_by_key(|k| f(k));
+    }
 }
 
 /// GridCell.
@@ -1143,9 +1251,8 @@ mod tests {
 
         let num_rows = 5;
         let num_cols = 5;
-        let capacity = 500;
 
-        let buffer = GridBuffer::new(num_rows, num_cols, capacity);
+        let buffer = GridBuffer::new_with_num_rows_cols(num_rows, num_cols);
         assert_eq!(buffer.num_rows(), num_rows);
         assert_eq!(buffer.num_cols(), num_cols);
         assert_eq!(buffer.total_num_u64_values(), 0);
@@ -1158,9 +1265,8 @@ mod tests {
 
         let num_rows = 2;
         let num_cols = 2;
-        let capacity = 500;
 
-        let mut buffer = GridBuffer::new(num_rows, num_cols, capacity);
+        let mut buffer = GridBuffer::new_with_num_rows_cols(num_rows, num_cols);
 
         let u64_values = vec![1, 2, 3];
         let f32_values = vec![1.0, 2.0, 3.0];
@@ -1180,9 +1286,8 @@ mod tests {
 
         let num_rows = 2;
         let num_cols = 2;
-        let capacity = 500;
 
-        let mut buffer = GridBuffer::new(num_rows, num_cols, capacity);
+        let mut buffer = GridBuffer::new_with_num_rows_cols(num_rows, num_cols);
 
         let f32_values = vec![1.0, 2.0, 3.0];
         let f32_values2 = vec![4.0, 5.0];
@@ -1201,9 +1306,8 @@ mod tests {
 
         let num_rows = 2;
         let num_cols = 2;
-        let capacity = 500;
 
-        let mut buffer = GridBuffer::new(num_rows, num_cols, capacity);
+        let mut buffer = GridBuffer::new_with_num_rows_cols(num_rows, num_cols);
 
         let u64_values = vec![1, 2, 3];
         let u64_values2 = vec![4, 5];
@@ -1224,13 +1328,13 @@ mod tests {
 
     #[test]
     fn test_gridbuffer_out_of_bounds_row() {
-        let buffer = GridBuffer::new(2, 2, 500);
+        let buffer = GridBuffer::new_with_num_rows_cols(2, 2);
         assert_eq!(buffer.get_u64_values(2, 0), &[]);
     }
 
     #[test]
     fn test_gridbuffer_out_of_bounds_col() {
-        let buffer = GridBuffer::new(2, 2, 500);
+        let buffer = GridBuffer::new_with_num_rows_cols(2, 2);
         assert_eq!(buffer.get_f32_values(0, 2), &[]);
     }
 
@@ -1240,9 +1344,8 @@ mod tests {
 
         let num_rows = 2;
         let num_cols = 2;
-        let capacity = 500;
 
-        let mut buffer = GridBuffer::new(num_rows, num_cols, capacity);
+        let mut buffer = GridBuffer::new_with_num_rows_cols(num_rows, num_cols);
 
         // Add some u64 and f32 values
         let u64_values = vec![1, 2, 3];
@@ -1277,7 +1380,7 @@ mod tests {
     fn test_gridbuffer_to_bytes_empty() {
         setup_log();
 
-        let buffer = GridBuffer::new(2, 2, 500);
+        let buffer = GridBuffer::new_with_num_rows_cols(2, 2);
 
         let bytes = buffer.to_bytes();
 
@@ -1297,9 +1400,8 @@ mod tests {
 
         let num_rows = 2;
         let num_cols = 2;
-        let capacity = 500;
 
-        let mut buffer = GridBuffer::new(num_rows, num_cols, capacity);
+        let mut buffer = GridBuffer::new_with_num_rows_cols(num_rows, num_cols);
 
         // Add some u64 values in unsorted order
         let u64_values = vec![100, 1, 50, 2];
@@ -1339,7 +1441,7 @@ mod tests {
     fn test_gridbuffer_to_bytes_sorted_empty() {
         setup_log();
 
-        let buffer = GridBuffer::new(2, 2, 500);
+        let buffer = GridBuffer::new_with_num_rows_cols(2, 2);
 
         let mut sorter = U32Sorter::new();
 

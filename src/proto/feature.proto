@@ -24,20 +24,26 @@ message DenseFeature {
 
 /// All features.
 message SimpleFeatures {
-    /// Request id.
-    uint64 llsid = 1;
+    /// Timestamp.
+    uint64 timestamp = 1;
 
-    /// item_id。
-    uint64 item_id = 2;
+    /// Request id.
+    uint64 req_id = 2;
+
+    /// User id.
+    uint64 user_id = 3;
+
+    /// Item id.
+    uint64 item_id = 4;
 
     /// Sparse feature.
-    repeated SparseFeature sparse_feature = 3;
+    repeated SparseFeature sparse_feature = 5;
 
     /// Dense feature.
-    repeated DenseFeature dense_feature = 4;
+    repeated DenseFeature dense_feature = 6;
 
     /// Label, only one int64 is supported currently.
-    int64 label = 5;
+    int64 label = 7;
 }
 
 /// Passing sparse feature from hub to ps.
