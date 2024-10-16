@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [unreleased]
+
+### 🚀 Features
+
+- Add batcher.rs
+- Add col_ids and col_ids_hash, GridRow
+
+### 🐛 Bug Fixes
+
+- Fix some docs
+- Fix some docs
+
 ## [0.2.0] - 2024-10-05
 
 ### 🚀 Features
