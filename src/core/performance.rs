@@ -16,9 +16,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use super::gridbuffer::GetCompressionType;
 use super::{gridbuffer::GridBuffer, timer::Timer};
 
-use crate::sniper::SimpleFeatures;
+use crate::core::feature_batcher::SimpleFeaturesBatcher;
 use crate::core::tool::U32Sorter;
-use crate::core::batcher::SimpleFeaturesBatcher;
+use crate::sniper::SimpleFeatures;
 
 /// Parse SimpleFeatures from base64 encoded protobuf data.
 pub fn parse_simple_features(data: &str) -> Result<SimpleFeatures> {
@@ -81,11 +81,7 @@ pub fn convert_simple_features_to_gridbuffer(
         })
         .map(|x| x.unwrap());
 
-    Ok(SimpleFeaturesBatcher::new(
-        simple_features,
-        num_rows,
-        num_cols,
-    ))
+    Ok(SimpleFeaturesBatcher::new(simple_features, num_rows))
 }
 
 /// Read SimpleFeatures from a file.

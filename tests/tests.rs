@@ -140,6 +140,42 @@ fn test_convert_simple_features_to_gridbuffer_file_with_bitpacking4x() -> Result
 }
 
 #[test]
+fn test_convert_simple_features_to_gridbuffer_file_with_bitpacking4x_row_4_col_81() -> Result<()> {
+    setup_log();
+
+    let filename = "resources/simple_features_nohash_96.txt";
+    let res_filename = "resources/gridbuffers_nohash_row_4_col_81_bitpacking4x.txt";
+
+    convert_simple_features_to_gridbuffer_file_with_bitpacking4x(
+        filename,
+        4,
+        81,
+        res_filename,
+        false,
+    )?;
+
+    Ok(())
+}
+
+#[test]
+fn test_convert_simple_features_to_gridbuffer_file_with_bitpacking4x_row_1_col_81() -> Result<()> {
+    setup_log();
+
+    let filename = "resources/simple_features_nohash_96.txt";
+    let res_filename = "resources/gridbuffers_nohash_row_1_col_81_bitpacking4x.txt";
+
+    convert_simple_features_to_gridbuffer_file_with_bitpacking4x(
+        filename,
+        1,
+        81,
+        res_filename,
+        false,
+    )?;
+
+    Ok(())
+}
+
+#[test]
 fn test_convert_simple_features_to_gridbuffer_file_with_bitpacking8x() -> Result<()> {
     setup_log();
 

@@ -20,17 +20,15 @@ pub struct SimpleFeaturesBatcher<I: Iterator<Item = SimpleFeatures>> {
     buffer: GridBuffer,
     row: usize,
     num_rows: usize,
-    num_cols: usize,
 }
 
 impl<I: Iterator<Item = SimpleFeatures>> SimpleFeaturesBatcher<I> {
-    pub fn new(features: I, num_rows: usize, num_cols: usize) -> Self {
+    pub fn new(features: I, num_rows: usize) -> Self {
         Self {
             features,
-            buffer: GridBuffer::new_with_num_rows_cols(num_rows, num_cols),
+            buffer: GridBuffer::new(),
             row: 0,
             num_rows,
-            num_cols,
         }
     }
 }
@@ -40,8 +38,14 @@ impl<I: Iterator<Item = SimpleFeatures>> Iterator for SimpleFeaturesBatcher<I> {
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(features) = self.features.next() {
-            let mut col = 0;
+            if !self.buffer.is_initialized() {
+                let num_cols = features.sparse_feature.len() + features.dense_feature.len();
 
+                let cols = (0..num_cols).map(|x| x as u32).collect::<Vec<_>>();
+                self.buffer.init(self.num_rows, cols);
+            }
+
+            let mut col = 0;
             for (i, sparse_feature) in features.sparse_feature.iter().enumerate() {
                 // Remove prefix.
                 let u64_values = &sparse_feature

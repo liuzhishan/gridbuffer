@@ -231,3 +231,12 @@ impl U32Sorter {
         i
     }
 }
+
+#[inline]
+pub fn gxhash32_u32_slice(data: &[u32]) -> u32 {
+    static GXHASH_SEED: i64 = 0x12345678;
+
+    let (_, middle, _) = unsafe { data.align_to::<u8>() };
+
+    gxhash::gxhash32(middle, GXHASH_SEED)
+}

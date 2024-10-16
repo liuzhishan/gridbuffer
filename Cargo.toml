@@ -26,6 +26,8 @@ prost = "0.13.1"
 prost-types = "0.13.1"
 strum = { version = "0.26", features = ["derive"] }
 strum_macros = "0.26"
+dashmap = "6.1.0"
+gxhash = "3.4.1"
 
 [build-dependencies]
 prost-build = "0.13.1"

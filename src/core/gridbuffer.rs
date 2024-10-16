@@ -65,21 +65,25 @@ use anyhow::{bail, Result};
 use bitpacking::{BitPacker4x, BitPacker8x};
 use likely_stable::{likely, unlikely};
 use log::{error, info};
+use std::slice;
 use std::{arch::is_riscv_feature_detected, default, ops::Range};
 use strum::{EnumCount, EnumDiscriminants, EnumString, FromRepr, ToString};
+
+use dashmap::DashMap;
 
 use crate::core::tool::check_alignment_result;
 
 use bitpacking::BitPacker;
 
 use crate::error_bail;
+use crate::sniper::SimpleFeatures;
 
 use super::{
     simd::{
         compress_bitpacker, compress_bitpacker4x, compress_bitpacker4x_sorted,
         compress_bitpacker8x, decompress_bitpacker, decompress_bitpacker4x,
     },
-    tool::{check_compression_type, check_data_length, check_range, U32Sorter},
+    tool::{check_compression_type, check_data_length, check_range, gxhash32_u32_slice, U32Sorter},
 };
 
 /// The data type of grid buffer.
@@ -142,31 +146,72 @@ pub const GRID_BUFFER_VERSION: u8 = 1;
 
 pub const FOUR: usize = 4;
 
+/// The basic information of the grid buffer.
 pub struct GridBasicInfo {
     pub version: u8,
     pub num_rows: usize,
     pub num_cols: usize,
     pub total_num_u64_values: usize,
     pub total_num_f32_values: usize,
+    pub col_ids: Vec<u32>,
+    pub col_ids_hash: u32,
     pub cells: Vec<Vec<GridCell>>,
 }
 
 /// GridBuffer format.
 ///
 /// Use `simd` to compress the `u64_data`.
+///
+/// For storage efficiency, we use `u32` to represent the `String` of column name.
+/// The bigger the `num_rows` is, the more efficient the storage will be.
+///
+/// We support two ways of access the data:
+/// 1. access by column index. It's faster, but you need to known which column index you want to access.
+/// 2. access by column id. It's more flexible, but slower than access by column index. It needs to build column index first.
+///     And when accessing the data, the column id need to be translated to column index by `col_index` mapping.
+///
+/// For the two accessing ways, we provide two `from_bytes` methods.
+/// 1. `from_bytes` is used for access by column index. It only restore the data, and do not build `col_index` mapping.
+/// 2. `from_bytes_with_col_index` is used for access by column id. It will restore the data, and build `col_index` mapping.
+///
+/// Choose the right way based on your actual usage.
+///
+/// TODO: Too much redundancy for get values and push values. Refactor to macros.
 #[derive(Clone)]
 pub struct GridBuffer {
+    /// The version of the grid buffer.
     version: u8,
+
+    /// The number of rows in the grid buffer.
     num_rows: usize,
+
+    /// The number of columns in the grid buffer.
     num_cols: usize,
+
+    /// The underlying u64 data in the grid buffer.
     u64_data: Vec<u64>,
+
+    /// The underlying f32 data in the grid buffer.
     f32_data: Vec<f32>,
+
+    /// The column id. Each id is an mapping of the column name.
+    col_ids: Vec<u32>,
+
+    /// For fast checking col ids, we use `gxhash` to hash the col ids.
+    ///
+    /// This should be passed as parameter from outside with `col_ids` parameter.
+    col_ids_hash: u32,
+
+    /// The column index.
+    col_index: DashMap<u32, usize>,
+
+    /// The cells in the grid buffer.
     cells: Vec<Vec<GridCell>>,
 }
 
 impl GridBuffer {
     /// Construct an empty new grid buffer.
-    /// 
+    ///
     /// To be more flexible, we don't set the grid size here.
     pub fn new() -> Self {
         Self {
@@ -175,13 +220,22 @@ impl GridBuffer {
             num_cols: 0,
             u64_data: vec![],
             f32_data: vec![],
+            col_ids: vec![],
+            col_ids_hash: 0,
+            col_index: DashMap::new(),
             cells: vec![],
         }
     }
 
     /// Construct a new grid buffer.
-    pub fn new_with_num_rows_cols(num_rows: usize, num_cols: usize) -> Self {
+    ///
+    /// To avoid unnecessary copy, the `cols` is not cloned, but moved.
+    pub fn new_with_num_rows_col_ids(num_rows: usize, col_ids: Vec<u32>) -> Self {
+        let num_cols = col_ids.len();
         let capacity = num_rows * num_cols * 5;
+
+        let col_index = Self::get_col_index(&col_ids);
+        let col_ids_hash = gxhash32_u32_slice(&col_ids);
 
         Self {
             version: GRID_BUFFER_VERSION,
@@ -189,6 +243,32 @@ impl GridBuffer {
             num_cols,
             u64_data: Vec::with_capacity(capacity),
             f32_data: Vec::with_capacity(capacity),
+            col_ids,
+            col_ids_hash,
+            col_index,
+            cells: vec![vec![GridCell::default(); num_cols]; num_rows],
+        }
+    }
+
+    pub fn new_with_num_rows_col_ids_hash(
+        num_rows: usize,
+        col_ids: Vec<u32>,
+        col_ids_hash: u32,
+    ) -> Self {
+        let num_cols = col_ids.len();
+        let capacity = num_rows * num_cols * 5;
+
+        let col_index = Self::get_col_index(&col_ids);
+
+        Self {
+            version: GRID_BUFFER_VERSION,
+            num_rows,
+            num_cols,
+            u64_data: Vec::with_capacity(capacity),
+            f32_data: Vec::with_capacity(capacity),
+            col_ids,
+            col_ids_hash,
+            col_index,
             cells: vec![vec![GridCell::default(); num_cols]; num_rows],
         }
     }
@@ -199,16 +279,65 @@ impl GridBuffer {
         num_cols: usize,
         u64_data: Vec<u64>,
         f32_data: Vec<f32>,
+        col_ids: Vec<u32>,
+        col_ids_hash: u32,
         cells: Vec<Vec<GridCell>>,
     ) -> Self {
+        let col_index = Self::get_col_index(&col_ids);
+
         Self {
             version: GRID_BUFFER_VERSION,
             num_rows,
             num_cols,
             u64_data,
             f32_data,
+            col_ids,
+            col_ids_hash,
+            col_index,
             cells,
         }
+    }
+
+    /// Initialize the grid buffer with `num_rows` and `cols`.
+    pub fn init(&mut self, num_rows: usize, col_ids: Vec<u32>) {
+        self.num_rows = num_rows;
+        self.num_cols = col_ids.len();
+        self.col_ids_hash = gxhash32_u32_slice(&col_ids);
+        self.col_ids = col_ids;
+        self.col_index = Self::get_col_index(&self.col_ids);
+        self.cells = vec![vec![GridCell::default(); self.num_cols]; self.num_rows];
+    }
+
+    #[inline]
+    pub fn is_initialized(&self) -> bool {
+        self.num_rows > 0 && self.num_cols > 0
+    }
+
+    #[inline]
+    pub fn col_ids_hash(&self) -> u32 {
+        self.col_ids_hash
+    }
+
+    #[inline]
+    pub fn is_col_ids_hash_equal(&self, col_ids_hash: u32) -> bool {
+        self.col_ids_hash == col_ids_hash
+    }
+
+    /// Get `col_index` from `cols`.
+    #[inline]
+    fn get_col_index(col_ids: &Vec<u32>) -> DashMap<u32, usize> {
+        col_ids
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(id, col)| (col, id))
+            .collect::<DashMap<_, _>>()
+    }
+
+    /// Build `col_index` from `cols`.
+    #[inline]
+    fn build_col_index(&mut self, col_ids: &Vec<u32>) {
+        self.col_index = Self::get_col_index(col_ids);
     }
 
     /// Clear the grid buffer.
@@ -223,6 +352,18 @@ impl GridBuffer {
         }
     }
 
+    /// Get the pointer of the u64 data.
+    #[inline]
+    pub fn u64_values(&self) -> &[u64] {
+        &self.u64_data
+    }
+
+    /// Get the pointer of the f32 data.
+    #[inline]
+    pub fn f32_values(&self) -> &[f32] {
+        &self.f32_data
+    }
+
     #[inline]
     pub fn num_rows(&self) -> usize {
         self.num_rows
@@ -231,6 +372,11 @@ impl GridBuffer {
     #[inline]
     pub fn num_cols(&self) -> usize {
         self.num_cols
+    }
+
+    #[inline]
+    pub fn col_ids(&self) -> &Vec<u32> {
+        &self.col_ids
     }
 
     #[inline]
@@ -245,27 +391,49 @@ impl GridBuffer {
         self.num_cols = num_cols;
     }
 
+    #[inline]
+    pub fn set_col_ids(&mut self, col_ids: &Vec<u32>) {
+        self.col_ids = col_ids.clone();
+        self.col_index = Self::get_col_index(&self.col_ids);
+    }
+
     /// Extend rows.
     #[inline]
     pub fn extend_rows(&mut self, num_rows: usize) {
         self.num_rows += num_rows;
-        self.cells.extend(vec![vec![GridCell::default(); self.num_cols]; num_rows]);
+        self.cells
+            .extend(vec![vec![GridCell::default(); self.num_cols]; num_rows]);
     }
 
     /// Extend columns.
-    #[inline]
-    pub fn extend_cols(&mut self, num_cols: usize) {
-        self.num_cols += num_cols;
-        for row in &mut self.cells {
-            row.extend(vec![GridCell::default(); num_cols]);
+    ///
+    /// Must update the `col_index` after extend columns.
+    pub fn extend_cols(&mut self, col_ids: &Vec<u32>) -> Result<()> {
+        let n = self.num_cols;
+
+        self.num_cols += col_ids.len();
+        self.col_ids.extend_from_slice(col_ids);
+
+        for (i, col) in col_ids.iter().enumerate() {
+            if self.col_index.contains_key(col) {
+                error_bail!("column id already exists: {}", col);
+            }
+
+            self.col_index.insert(col.clone(), n + i);
         }
+
+        for row in &mut self.cells {
+            row.extend(vec![GridCell::default(); col_ids.len()]);
+        }
+
+        Ok(())
     }
 
     /// Extend rows and columns.
     #[inline]
-    pub fn extend_rows_cols(&mut self, num_rows: usize, num_cols: usize) {
+    pub fn extend_rows_cols(&mut self, num_rows: usize, col_ids: &Vec<u32>) {
         self.extend_rows(num_rows);
-        self.extend_cols(num_cols);
+        self.extend_cols(col_ids);
     }
 
     /// Push a cell into the grid buffer.
@@ -279,7 +447,30 @@ impl GridBuffer {
         self.cells[row][col] = value;
     }
 
-    /// Get a cell from the grid buffer.
+    /// Get the column index by the column id.
+    ///
+    /// TODO: speed up the search.
+    #[inline]
+    fn get_col_by_id(&self, col_id: u32) -> Option<usize> {
+        match self.col_index.get(&col_id) {
+            Some(id) => Some(id.value().clone()),
+            None => None,
+        }
+    }
+
+    #[inline]
+    pub fn push_cell_by_col_id(&mut self, row: usize, col_id: u32, value: GridCell) -> Result<()> {
+        match self.get_col_by_id(col_id) {
+            Some(col) => {
+                self.push_cell(row, col, value);
+                Ok(())
+            }
+            None => {
+                error_bail!("column id not found: {}", col_id);
+            }
+        }
+    }
+
     #[inline]
     pub fn get_cell(&self, row: usize, col: usize) -> Option<&GridCell> {
         if unlikely(row >= self.num_rows || col >= self.num_cols) {
@@ -288,6 +479,18 @@ impl GridBuffer {
         }
 
         Some(&self.cells[row][col])
+    }
+
+    /// Get the cell by the column id.
+    #[inline]
+    pub fn get_cell_by_col_id(&self, row: usize, col_id: u32) -> Option<&GridCell> {
+        match self.get_col_by_id(col_id) {
+            Some(col) => self.get_cell(row, col),
+            None => {
+                error!("column id not found: {}", col_id);
+                None
+            }
+        }
     }
 
     /// Push a u64 value into the grid buffer.
@@ -304,9 +507,39 @@ impl GridBuffer {
         self.cells[row][col] = GridCell::U64Cell(GridCellU64 { range });
     }
 
+    pub fn push_u64_values_by_col_id(
+        &mut self,
+        row: usize,
+        col_id: u32,
+        values: &[u64],
+    ) -> Result<()> {
+        match self.get_col_by_id(col_id) {
+            Some(col) => {
+                self.push_u64_values(row, col, values);
+                Ok(())
+            }
+            None => {
+                error_bail!("column id not found: {}", col_id);
+            }
+        }
+    }
+
     #[inline]
     pub fn push_u64(&mut self, row: usize, col: usize, value: u64) {
         self.push_u64_values(row, col, &[value]);
+    }
+
+    #[inline]
+    pub fn push_u64_by_col_id(&mut self, row: usize, col_id: u32, value: u64) -> Result<()> {
+        match self.get_col_by_id(col_id) {
+            Some(col) => {
+                self.push_u64(row, col, value);
+                Ok(())
+            }
+            None => {
+                error_bail!("column id not found: {}", col_id);
+            }
+        }
     }
 
     /// Push a f32 value into the grid buffer.
@@ -323,9 +556,39 @@ impl GridBuffer {
         self.cells[row][col] = GridCell::F32Cell(GridCellF32 { range });
     }
 
+    pub fn push_f32_values_by_col_id(
+        &mut self,
+        row: usize,
+        col_id: u32,
+        values: &[f32],
+    ) -> Result<()> {
+        match self.get_col_by_id(col_id) {
+            Some(col) => {
+                self.push_f32_values(row, col, values);
+                Ok(())
+            }
+            None => {
+                error_bail!("column id not found: {}", col_id);
+            }
+        }
+    }
+
     #[inline]
     pub fn push_f32(&mut self, row: usize, col: usize, value: f32) {
         self.push_f32_values(row, col, &[value]);
+    }
+
+    #[inline]
+    pub fn push_f32_by_col_id(&mut self, row: usize, col_id: u32, value: f32) -> Result<()> {
+        match self.get_col_by_id(col_id) {
+            Some(col) => {
+                self.push_f32(row, col, value);
+                Ok(())
+            }
+            None => {
+                error_bail!("column id not found: {}", col_id);
+            }
+        }
     }
 
     /// Get u64 values from the cell of grid buffer.
@@ -345,6 +608,41 @@ impl GridBuffer {
         }
     }
 
+    /// Get u64 values from the cell by the column id.
+    #[inline]
+    pub fn get_u64_values_by_col_id(&self, row: usize, col_id: u32) -> &[u64] {
+        match self.get_col_by_id(col_id) {
+            Some(col) => self.get_u64_values(row, col),
+            None => &[],
+        }
+    }
+
+    /// Get u64 values from the cell.
+    #[inline]
+    pub fn get_u64_values_by_cell_u64(&self, cell: &GridCellU64) -> &[u64] {
+        if unlikely(cell.range.start >= self.u64_data.len() || cell.range.end > self.u64_data.len())
+        {
+            error!(
+                "out of bounds, range: {:?}, len: {}",
+                cell.range,
+                self.u64_data.len()
+            );
+            return &[];
+        }
+
+        &self.u64_data[cell.range.clone()]
+    }
+
+    /// Get u64 values from the cell.
+    #[inline]
+    pub fn get_u64_values_by_cell(&self, cell: &GridCell) -> &[u64] {
+        match cell {
+            GridCell::U64Cell(cell) => self.get_u64_values_by_cell_u64(cell),
+            _ => &[],
+        }
+    }
+
+    /// Get u64 value by row and col.
     #[inline]
     pub fn get_u64(&self, row: usize, col: usize) -> Option<u64> {
         if unlikely(row >= self.num_rows || col >= self.num_cols) {
@@ -355,12 +653,54 @@ impl GridBuffer {
         match &self.cells[row][col] {
             GridCell::U64Cell(cell) => {
                 if cell.range.len() == 1 {
+                    if cell.range.start >= self.u64_data.len() {
+                        error!(
+                            "out of bounds, range.start: {}, len: {}",
+                            cell.range.start,
+                            self.u64_data.len()
+                        );
+                        return None;
+                    }
+
                     Some(self.u64_data[cell.range.start])
                 } else {
                     None
                 }
             }
             _ => None,
+        }
+    }
+
+    /// Get u64 value by the column id.
+    #[inline]
+    pub fn get_u64_by_col_id(&self, row: usize, col_id: u32) -> Option<u64> {
+        match self.get_col_by_id(col_id) {
+            Some(col) => self.get_u64(row, col),
+            None => None,
+        }
+    }
+
+    /// Get u64 value by the cell u64.
+    #[inline]
+    pub fn get_u64_by_cell_u64(&self, cell: &GridCellU64) -> Option<u64> {
+        self.get_u64_values_by_cell_u64(cell).first().cloned()
+    }
+
+    /// Get u64 value by the cell.
+    #[inline]
+    pub fn get_u64_by_cell(&self, cell: &GridCell) -> Option<u64> {
+        match cell {
+            GridCell::U64Cell(cell) => self.get_u64_by_cell_u64(cell),
+            _ => None,
+        }
+    }
+
+    /// Get mut u64 values by the cell.
+    #[inline]
+    pub fn get_u64_values_by_cell_mut(&mut self, cell: &GridCell) -> &mut [u64] {
+        match cell {
+            GridCell::U64Cell(cell) => &mut self.u64_data[cell.range.clone()],
+            _ => &mut [],
         }
     }
 
@@ -378,6 +718,41 @@ impl GridBuffer {
         }
     }
 
+    /// Get f32 values from the cell by the column id.
+    #[inline]
+    pub fn get_f32_values_by_col_id(&self, row: usize, col_id: u32) -> &[f32] {
+        match self.get_col_by_id(col_id) {
+            Some(col) => self.get_f32_values(row, col),
+            None => &[],
+        }
+    }
+
+    /// Get f32 values from the cell.
+    #[inline]
+    pub fn get_f32_values_by_cell_f32(&self, cell: &GridCellF32) -> &[f32] {
+        if unlikely(cell.range.start >= self.f32_data.len() || cell.range.end > self.f32_data.len())
+        {
+            error!(
+                "out of bounds, range: {:?}, len: {}",
+                cell.range,
+                self.f32_data.len()
+            );
+            return &[];
+        }
+
+        &self.f32_data[cell.range.clone()]
+    }
+
+    /// Get f32 values from the cell f32.
+    #[inline]
+    pub fn get_f32_values_by_cell(&self, cell: &GridCell) -> &[f32] {
+        match cell {
+            GridCell::F32Cell(cell) => self.get_f32_values_by_cell_f32(cell),
+            _ => &[],
+        }
+    }
+
+    /// Get f32 value by row and col.
     #[inline]
     pub fn get_f32(&self, row: usize, col: usize) -> Option<f32> {
         if unlikely(row >= self.num_rows || col >= self.num_cols) {
@@ -388,11 +763,44 @@ impl GridBuffer {
         match &self.cells[row][col] {
             GridCell::F32Cell(cell) => {
                 if cell.range.len() == 1 {
+                    if cell.range.start >= self.f32_data.len() {
+                        error!(
+                            "out of bounds, range.start: {}, len: {}",
+                            cell.range.start,
+                            self.f32_data.len()
+                        );
+                        return None;
+                    }
+
                     Some(self.f32_data[cell.range.start])
                 } else {
                     None
                 }
             }
+            _ => None,
+        }
+    }
+
+    /// Get f32 value by the column id.
+    #[inline]
+    pub fn get_f32_by_col_id(&self, row: usize, col_id: u32) -> Option<f32> {
+        match self.get_col_by_id(col_id) {
+            Some(col) => self.get_f32(row, col),
+            None => None,
+        }
+    }
+
+    /// Get f32 value by the cell f32.
+    #[inline]
+    pub fn get_f32_by_cell_f32(&self, cell: &GridCellF32) -> Option<f32> {
+        self.get_f32_values_by_cell_f32(cell).first().cloned()
+    }
+
+    /// Get f32 value by the cell.
+    #[inline]
+    pub fn get_f32_by_cell(&self, cell: &GridCell) -> Option<f32> {
+        match cell {
+            GridCell::F32Cell(cell) => self.get_f32_by_cell_f32(cell),
             _ => None,
         }
     }
@@ -437,18 +845,20 @@ impl GridBuffer {
     /// 3. num_cols: usize
     /// 4. total_num_u64_values: usize
     /// 5. total_num_f32_values: usize
-    /// 6. num_rows * num_cols * 2 usize:
+    /// 6. col_ids: Vec<u32>
+    /// 7. col_ids_hash: u32
+    /// 8. num_rows * num_cols * 2 usize:
     ///      for each cell, it's stored as:
     ///          data_type: u8
     ///          range.start: usize
     ///          range.end: usize
-    /// 7. compression_type: u8
-    /// 8. compressed_u64_total_num_bytes: usize
-    /// 9. num_bits: u8
-    /// 10. compressed u64 bytes
-    /// 11. compresson_type: u8
-    /// 12. compressed_f32_total_num_bytes: usize
-    /// 14. compressed f32 bytes
+    /// 9. compression_type: u8
+    /// 10. compressed_u64_total_num_bytes: usize
+    /// 11. num_bits: u8
+    /// 12. compressed u64 bytes
+    /// 13. compresson_type: u8
+    /// 14. compressed_f32_total_num_bytes: usize
+    /// 15. compressed f32 bytes
     #[inline]
     pub fn to_bytes(&self) -> Vec<u8> {
         self.to_bytes_bitpacking4x()
@@ -458,7 +868,7 @@ impl GridBuffer {
     pub fn to_bytes_with_bitpacking<T: BitPacker + GetCompressionType>(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.estimated_bytes());
 
-        self.serialize_basic_info(&mut buf);
+        self.serialize_basic_info::<T>(&mut buf);
 
         // Compressed u64 data.
         self.u64_data_to_bytes_bitpacking::<T>(&mut buf);
@@ -489,7 +899,7 @@ impl GridBuffer {
         let mut buf = Vec::with_capacity(self.estimated_bytes());
 
         // Serialize basic info.
-        self.serialize_basic_info(&mut buf);
+        self.serialize_basic_info::<BitPacker4x>(&mut buf);
 
         // Compressed u64 data.
         self.u64_data_to_bytes_with_sorted(&mut buf, sorter);
@@ -506,8 +916,10 @@ impl GridBuffer {
     /// 3. num_cols: usize
     /// 4. total_num_u64_values: usize
     /// 5. total_num_f32_values: usize
-    /// 6. cells: Vec<Vec<GridCell>>
-    pub fn serialize_basic_info(&self, buf: &mut Vec<u8>) {
+    /// 6. col_ids: Vec<u32>
+    /// 7. col_ids_hash: u32
+    /// 8. cells: Vec<Vec<GridCell>>
+    pub fn serialize_basic_info<T: BitPacker + GetCompressionType>(&self, buf: &mut Vec<u8>) {
         // version
         self.push_u8_le(self.version, buf);
 
@@ -516,12 +928,27 @@ impl GridBuffer {
         self.push_usize_le(self.num_rows, buf);
         self.push_usize_le(self.num_cols, buf);
 
-        // total_num_u64_values, total_num_f32_values
+        // total_num_u64_values, total_num_f32_values.
         self.push_usize_le(self.total_num_u64_values(), buf);
         self.push_usize_le(self.total_num_f32_values(), buf);
 
+        // col_ids.
+        self.col_ids_to_bytes::<T>(buf);
+
         // Cells.
         self.cells_to_bytes(buf);
+    }
+
+    /// `col_ids` to bytes.
+    fn col_ids_to_bytes<T: BitPacker + GetCompressionType>(&self, buf: &mut Vec<u8>) {
+        let compressed_col_ids = compress_bitpacker::<T>(self.col_ids.as_slice());
+
+        self.push_u8_le(T::get_compression_type() as u8, buf);
+        self.push_usize_le(compressed_col_ids.len(), buf);
+
+        buf.extend_from_slice(compressed_col_ids.as_slice());
+
+        self.push_u32_le(self.col_ids_hash, buf);
     }
 
     /// Cells to bytes.
@@ -624,6 +1051,7 @@ impl GridBuffer {
     /// Parse cells from bytes.
     fn parse_cells(
         bytes: &[u8],
+        start_pos: usize,
         num_rows: usize,
         num_cols: usize,
         total_num_u64_values: usize,
@@ -631,8 +1059,7 @@ impl GridBuffer {
     ) -> Result<(Vec<Vec<GridCell>>, usize)> {
         let mut cells = vec![vec![GridCell::default(); num_cols]; num_rows];
 
-        let usize_size = 4;
-        let mut pos = 4 * usize_size + 1;
+        let mut pos = start_pos;
 
         for row in 0..num_rows {
             for col in 0..num_cols {
@@ -644,7 +1071,7 @@ impl GridBuffer {
                 };
 
                 let range_start = Self::parse_usize_le_unchecked(bytes, pos + 1);
-                let range_end = Self::parse_usize_le_unchecked(bytes, pos + 1 + usize_size);
+                let range_end = Self::parse_usize_le_unchecked(bytes, pos + 1 + FOUR);
 
                 if data_type == GridDataType::None {
                     cells[row][col] = GridCell::None;
@@ -664,7 +1091,7 @@ impl GridBuffer {
                     error_bail!("invalid data type: {}", data_type.to_string());
                 }
 
-                pos += 2 * usize_size + 1;
+                pos += 2 * FOUR + 1;
             }
         }
 
@@ -715,12 +1142,56 @@ impl GridBuffer {
         }
     }
 
-    /// Parse u64 data without compression.
-    fn parse_u64_data_without_compression(
+    /// Parse u32 data from bytes.
+    ///
+    /// Return the `u32_data`position of the next field.
+    fn parse_u32_data(
         bytes: &[u8],
         start_pos: usize,
-        total_num_u64_values: usize,
-    ) -> Result<(Vec<u64>, usize)> {
+        total_num_u32_values: usize,
+    ) -> Result<(Vec<u32>, usize)> {
+        // compressed_u32_data_len.
+        let usize_size = 4;
+
+        let compression_type = match CompressionType::from_repr(bytes[start_pos]) {
+            Some(compression_type) => compression_type,
+            None => {
+                error_bail!("invalid compression type: {}", bytes[start_pos]);
+            }
+        };
+
+        match compression_type {
+            CompressionType::None => {
+                Self::parse_u32_data_without_compression(bytes, start_pos + 1, total_num_u32_values)
+            }
+            CompressionType::BitPacking4x => {
+                Self::parse_u32_data_with_bitpacking4x(bytes, start_pos + 1, total_num_u32_values)
+            }
+            CompressionType::BitPacking8x => {
+                Self::parse_u32_data_with_bitpacking8x(bytes, start_pos + 1, total_num_u32_values)
+            }
+            CompressionType::BitPacking4xDiffCoding => {
+                Self::parse_u32_data_with_bitpacking4x_sorted(
+                    bytes,
+                    start_pos + 1,
+                    total_num_u32_values,
+                )
+            }
+            _ => {
+                error_bail!(
+                    "unsupported compression_type: {}",
+                    compression_type.to_string()
+                );
+            }
+        }
+    }
+
+    /// Parse int data without compression.
+    fn parse_int_data_without_compression<T: Sized + Clone>(
+        bytes: &[u8],
+        start_pos: usize,
+        total_num_int_values: usize,
+    ) -> Result<(Vec<T>, usize)> {
         let mut pos = start_pos;
 
         let compressed_data_len = Self::parse_usize_le_unchecked(bytes, pos);
@@ -728,12 +1199,30 @@ impl GridBuffer {
 
         let u8_data = bytes[pos..pos + compressed_data_len].to_vec();
 
-        let (prefix, middle, suffix) = unsafe { u8_data.align_to::<u64>() };
+        let (prefix, middle, suffix) = unsafe { u8_data.align_to::<T>() };
         check_alignment_result(prefix.len(), suffix.len())?;
 
-        check_data_length(middle.len(), total_num_u64_values)?;
+        check_data_length(middle.len(), total_num_int_values)?;
 
         Ok((middle.to_vec(), pos + compressed_data_len))
+    }
+
+    /// Parse u64 data without compression.
+    fn parse_u64_data_without_compression(
+        bytes: &[u8],
+        start_pos: usize,
+        total_num_u64_values: usize,
+    ) -> Result<(Vec<u64>, usize)> {
+        Self::parse_int_data_without_compression::<u64>(bytes, start_pos, total_num_u64_values)
+    }
+
+    /// Parse u32 data without compression.
+    fn parse_u32_data_without_compression(
+        bytes: &[u8],
+        start_pos: usize,
+        total_num_u32_values: usize,
+    ) -> Result<(Vec<u32>, usize)> {
+        Self::parse_int_data_without_compression::<u32>(bytes, start_pos, total_num_u32_values)
     }
 
     /// Parse u32 data with bitpacking.
@@ -840,6 +1329,23 @@ impl GridBuffer {
         let compressed_data_len = Self::parse_usize_le_unchecked(bytes, start_pos);
 
         Self::parse_u32_data_with_bitpacking::<BitPacker4x>(
+            bytes,
+            start_pos + FOUR,
+            compressed_data_len,
+            total_num_u32_values,
+            false,
+        )
+    }
+
+    /// Parse u32 data with bitpacking8x.
+    fn parse_u32_data_with_bitpacking8x(
+        bytes: &[u8],
+        start_pos: usize,
+        total_num_u32_values: usize,
+    ) -> Result<(Vec<u32>, usize)> {
+        let compressed_data_len = Self::parse_usize_le_unchecked(bytes, start_pos);
+
+        Self::parse_u32_data_with_bitpacking::<BitPacker8x>(
             bytes,
             start_pos + FOUR,
             compressed_data_len,
@@ -1015,7 +1521,9 @@ impl GridBuffer {
             basic_info.num_cols,
             u64_data,
             f32_data,
-            basic_info.cells,
+            basic_info.col_ids.clone(),
+            basic_info.col_ids_hash,
+            basic_info.cells.clone(),
         ))
     }
 
@@ -1051,6 +1559,11 @@ impl GridBuffer {
         buffer.extend_from_slice(&(value as u32).to_le_bytes());
     }
 
+    #[inline]
+    fn push_u32_le(&self, value: u32, buffer: &mut Vec<u8>) {
+        buffer.extend_from_slice(&value.to_le_bytes());
+    }
+
     /// Parse basic info from bytes.
     fn parse_basic_info(bytes: &[u8]) -> Result<(GridBasicInfo, usize)> {
         // version
@@ -1063,9 +1576,13 @@ impl GridBuffer {
         let (total_num_u64_values, total_num_f32_values) =
             Self::parse_num_u64_and_f32_values(bytes);
 
+        // col_ids
+        let (col_ids, col_ids_hash, pos) = Self::parse_col_ids(bytes, num_cols)?;
+
         // Cell ranges.
         let (cells, pos) = Self::parse_cells(
             bytes,
+            pos,
             num_rows,
             num_cols,
             total_num_u64_values,
@@ -1078,10 +1595,26 @@ impl GridBuffer {
             num_cols,
             total_num_u64_values,
             total_num_f32_values,
+            col_ids,
+            col_ids_hash,
             cells,
         };
 
         Ok((basic_info, pos))
+    }
+
+    /// Parse col_ids from bytes.
+    ///
+    /// Return (col_ids, col_ids_hash, pos).
+    #[inline]
+    fn parse_col_ids(bytes: &[u8], num_cols: usize) -> Result<(Vec<u32>, u32, usize)> {
+        let pos = 4 * FOUR + 1;
+
+        let (col_ids, pos) = Self::parse_u32_data(bytes, pos, num_cols)?;
+
+        let col_ids_hash = Self::parse_u32_le_unchecked(bytes, pos);
+
+        Ok((col_ids, col_ids_hash, pos + FOUR))
     }
 
     /// Parse u32 from little-endian bytes.
@@ -1151,20 +1684,62 @@ impl GridBuffer {
     }
 
     /// Sort the rows by function by `f`.
-    fn sort_rows_by<F, T>(&mut self, f: F)
+    pub fn sort_rows_by<F, T>(&mut self, f: F)
     where
         F: Fn(&Vec<GridCell>) -> T,
         T: Ord,
     {
         self.cells.sort_by_key(|k| f(k));
     }
+
+    /// Convert `SimpleFeatures` to `GridBuffer` with `1` row.
+    ///
+    /// The first four columns are preserved for `SampleKey` fields.
+    ///
+    /// The `sample_key_ids` are global ids for `SampleKey` fields.
+    ///
+    /// The `feature_ids` are global ids for sparse feature and dense feature names.
+    pub fn from_simple_features(
+        sample_key_ids: &'static [u32],
+        feature_ids: &[u32],
+        simple_features: &SimpleFeatures,
+    ) -> Self {
+        let ids = sample_key_ids
+            .iter()
+            .chain(feature_ids.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut res = Self::new_with_num_rows_col_ids(1, ids);
+
+        res.push_u64(0, 0, simple_features.timestamp);
+        res.push_u64(0, 1, simple_features.user_id);
+        res.push_u64(0, 2, simple_features.item_id);
+        res.push_u64(0, 3, simple_features.llsid);
+
+        for (i, sparse_feature) in simple_features.sparse_feature.iter().enumerate() {
+            res.push_u64_values(0, 4 + i as usize, &sparse_feature.values);
+        }
+
+        let num_sparse_features = simple_features.sparse_feature.len() as usize;
+        for (i, dense_feature) in simple_features.dense_feature.iter().enumerate() {
+            res.push_f32_values(
+                0,
+                4 + num_sparse_features + i as usize,
+                &dense_feature.values,
+            );
+        }
+
+        res
+    }
 }
 
 /// GridCell.
 ///
 /// Meta data for each cell.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct GridCellU64 {
+    /// The range of the cell in the u64 data.
     pub range: Range<usize>,
 }
 
@@ -1174,10 +1749,28 @@ impl GridCellU64 {
     pub fn clear(&mut self) {
         self.range = 0..0;
     }
+
+    /// Get the u64 values by the cell.
+    ///
+    /// Used when sorting.
+    ///
+    /// The `gridbuffer` is borrow as mutable, but the compare function is borrowing each
+    /// cell as immutable. We cannot borrow `gridbuffer` as mutable and immutable the same time.
+    /// So we pass the pointer to each cell and the length of the u64 data to this function.
+    #[inline]
+    pub fn get_u64_values(&self, u64_ptr: *const u64, len: usize) -> &[u64] {
+        if unlikely(self.range.start >= len || self.range.end > len) {
+            error!("out of bounds, range: {:?}, len: {}", self.range, len);
+            return &[];
+        }
+
+        unsafe { slice::from_raw_parts(u64_ptr.add(self.range.start), self.range.len()) }
+    }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct GridCellF32 {
+    /// The range of the cell in the f32 data.
     pub range: Range<usize>,
 }
 
@@ -1187,10 +1780,20 @@ impl GridCellF32 {
     pub fn clear(&mut self) {
         self.range = 0..0;
     }
+
+    #[inline]
+    pub fn get_f32_values(&self, f32_ptr: *const f32, len: usize) -> &[f32] {
+        if unlikely(self.range.start >= len || self.range.end > len) {
+            error!("out of bounds, range: {:?}, len: {}", self.range, len);
+            return &[];
+        }
+
+        unsafe { slice::from_raw_parts(f32_ptr.add(self.range.start), self.range.len()) }
+    }
 }
 
 /// Use enum to represent different types of cells.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum GridCell {
     /// No data type.
     None,
@@ -1236,6 +1839,42 @@ impl GridCell {
             GridCell::F32Cell(cell) => cell.clear(),
         }
     }
+
+    /// Get the u64 values by the cell.
+    #[inline]
+    pub fn get_u64_values(&self, u64_ptr: *const u64, len: usize) -> &[u64] {
+        match self {
+            GridCell::U64Cell(cell) => cell.get_u64_values(u64_ptr, len),
+            _ => &[],
+        }
+    }
+
+    /// Get the u64 value by the cell.
+    #[inline]
+    pub fn get_u64(&self, u64_ptr: *const u64, len: usize) -> Option<u64> {
+        match self {
+            GridCell::U64Cell(cell) => cell.get_u64_values(u64_ptr, len).first().cloned(),
+            _ => None,
+        }
+    }
+
+    /// Get the f32 values by the cell.
+    #[inline]
+    pub fn get_f32_values(&self, f32_ptr: *const f32, len: usize) -> &[f32] {
+        match self {
+            GridCell::F32Cell(cell) => cell.get_f32_values(f32_ptr, len),
+            _ => &[],
+        }
+    }
+
+    /// Get the f32 value by the cell.
+    #[inline]
+    pub fn get_f32(&self, f32_ptr: *const f32, len: usize) -> Option<f32> {
+        match self {
+            GridCell::F32Cell(cell) => cell.get_f32_values(f32_ptr, len).first().cloned(),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1252,7 +1891,9 @@ mod tests {
         let num_rows = 5;
         let num_cols = 5;
 
-        let buffer = GridBuffer::new_with_num_rows_cols(num_rows, num_cols);
+        let col_ids = (0..num_cols).map(|x| x as u32).collect::<Vec<_>>();
+
+        let buffer = GridBuffer::new_with_num_rows_col_ids(num_rows, col_ids);
         assert_eq!(buffer.num_rows(), num_rows);
         assert_eq!(buffer.num_cols(), num_cols);
         assert_eq!(buffer.total_num_u64_values(), 0);
@@ -1266,7 +1907,9 @@ mod tests {
         let num_rows = 2;
         let num_cols = 2;
 
-        let mut buffer = GridBuffer::new_with_num_rows_cols(num_rows, num_cols);
+        let col_ids = (0..num_cols).map(|x| x as u32).collect::<Vec<_>>();
+
+        let mut buffer = GridBuffer::new_with_num_rows_col_ids(num_rows, col_ids);
 
         let u64_values = vec![1, 2, 3];
         let f32_values = vec![1.0, 2.0, 3.0];
@@ -1287,7 +1930,9 @@ mod tests {
         let num_rows = 2;
         let num_cols = 2;
 
-        let mut buffer = GridBuffer::new_with_num_rows_cols(num_rows, num_cols);
+        let col_ids = (0..num_cols).map(|x| x as u32).collect::<Vec<_>>();
+
+        let mut buffer = GridBuffer::new_with_num_rows_col_ids(num_rows, col_ids);
 
         let f32_values = vec![1.0, 2.0, 3.0];
         let f32_values2 = vec![4.0, 5.0];
@@ -1307,7 +1952,9 @@ mod tests {
         let num_rows = 2;
         let num_cols = 2;
 
-        let mut buffer = GridBuffer::new_with_num_rows_cols(num_rows, num_cols);
+        let col_ids = (0..num_cols).map(|x| x as u32).collect::<Vec<_>>();
+
+        let mut buffer = GridBuffer::new_with_num_rows_col_ids(num_rows, col_ids);
 
         let u64_values = vec![1, 2, 3];
         let u64_values2 = vec![4, 5];
@@ -1328,13 +1975,19 @@ mod tests {
 
     #[test]
     fn test_gridbuffer_out_of_bounds_row() {
-        let buffer = GridBuffer::new_with_num_rows_cols(2, 2);
+        let num_cols = 2;
+        let col_ids = (0..num_cols).map(|x| x as u32).collect::<Vec<_>>();
+
+        let buffer = GridBuffer::new_with_num_rows_col_ids(2, col_ids);
         assert_eq!(buffer.get_u64_values(2, 0), &[]);
     }
 
     #[test]
     fn test_gridbuffer_out_of_bounds_col() {
-        let buffer = GridBuffer::new_with_num_rows_cols(2, 2);
+        let num_cols = 2;
+        let col_ids = (0..num_cols).map(|x| x as u32).collect::<Vec<_>>();
+
+        let buffer = GridBuffer::new_with_num_rows_col_ids(2, col_ids);
         assert_eq!(buffer.get_f32_values(0, 2), &[]);
     }
 
@@ -1345,7 +1998,9 @@ mod tests {
         let num_rows = 2;
         let num_cols = 2;
 
-        let mut buffer = GridBuffer::new_with_num_rows_cols(num_rows, num_cols);
+        let col_ids = (0..num_cols).map(|x| x as u32).collect::<Vec<_>>();
+
+        let mut buffer = GridBuffer::new_with_num_rows_col_ids(num_rows, col_ids);
 
         // Add some u64 and f32 values
         let u64_values = vec![1, 2, 3];
@@ -1380,7 +2035,12 @@ mod tests {
     fn test_gridbuffer_to_bytes_empty() {
         setup_log();
 
-        let buffer = GridBuffer::new_with_num_rows_cols(2, 2);
+        let num_rows = 2;
+        let num_cols = 2;
+
+        let col_ids = (0..num_cols).map(|x| x as u32).collect::<Vec<_>>();
+
+        let buffer = GridBuffer::new_with_num_rows_col_ids(num_rows, col_ids);
 
         let bytes = buffer.to_bytes();
 
@@ -1401,7 +2061,9 @@ mod tests {
         let num_rows = 2;
         let num_cols = 2;
 
-        let mut buffer = GridBuffer::new_with_num_rows_cols(num_rows, num_cols);
+        let col_ids = (0..num_cols).map(|x| x as u32).collect::<Vec<_>>();
+
+        let mut buffer = GridBuffer::new_with_num_rows_col_ids(num_rows, col_ids);
 
         // Add some u64 values in unsorted order
         let u64_values = vec![100, 1, 50, 2];
@@ -1441,7 +2103,12 @@ mod tests {
     fn test_gridbuffer_to_bytes_sorted_empty() {
         setup_log();
 
-        let buffer = GridBuffer::new_with_num_rows_cols(2, 2);
+        let num_rows = 2;
+        let num_cols = 2;
+
+        let col_ids = (0..num_cols).map(|x| x as u32).collect::<Vec<_>>();
+
+        let buffer = GridBuffer::new_with_num_rows_col_ids(num_rows, col_ids);
 
         let mut sorter = U32Sorter::new();
 
@@ -1449,8 +2116,8 @@ mod tests {
 
         let restored_buffer = GridBuffer::from_bytes(&bytes).unwrap();
 
-        assert_eq!(restored_buffer.num_rows(), 2);
-        assert_eq!(restored_buffer.num_cols(), 2);
+        assert_eq!(restored_buffer.num_rows(), num_rows);
+        assert_eq!(restored_buffer.num_cols(), num_cols);
         assert_eq!(restored_buffer.total_num_u64_values(), 0);
         assert_eq!(restored_buffer.total_num_f32_values(), 0);
     }
