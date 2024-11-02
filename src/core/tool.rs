@@ -1,8 +1,8 @@
 //! Tool.
 
 use anyhow::{bail, Result};
-use likely_stable::{likely, unlikely};
-use log::{error, info};
+use likely_stable::unlikely;
+use log::error;
 use std::{io::Write, sync::Once};
 
 use super::gridbuffer::CompressionType;

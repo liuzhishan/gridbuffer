@@ -58,21 +58,19 @@
 //!
 //! `GridBuffer` is designed to solve all the critical problems above for sparse model training.
 //!
-#![feature(portable_simd)]
-use core::simd::prelude::*;
-
 use anyhow::{bail, Result};
 use bitpacking::{BitPacker4x, BitPacker8x};
-use likely_stable::{likely, unlikely};
-use log::{error, info};
+use likely_stable::unlikely;
+use log::error;
+use std::ops::Range;
 use std::slice;
-use std::{arch::is_riscv_feature_detected, default, ops::Range};
-use strum::{EnumCount, EnumDiscriminants, EnumString, FromRepr, ToString};
+use strum::{Display, EnumCount, EnumDiscriminants, EnumString, FromRepr};
 
 use dashmap::DashMap;
 
 use crate::core::tool::check_alignment_result;
 
+use base64::{engine::general_purpose, Engine as _};
 use bitpacking::BitPacker;
 
 use crate::error_bail;
@@ -81,14 +79,14 @@ use crate::sniper::SimpleFeatures;
 use super::{
     simd::{
         compress_bitpacker, compress_bitpacker4x, compress_bitpacker4x_sorted,
-        compress_bitpacker8x, decompress_bitpacker, decompress_bitpacker4x,
+        compress_bitpacker8x, decompress_bitpacker,
     },
     tool::{check_compression_type, check_data_length, check_range, gxhash32_u32_slice, U32Sorter},
 };
 
 /// The data type of grid buffer.
 #[derive(
-    Default, Clone, FromRepr, Debug, PartialEq, EnumCount, EnumDiscriminants, EnumString, ToString,
+    Default, Clone, FromRepr, Debug, PartialEq, EnumCount, EnumDiscriminants, EnumString, Display,
 )]
 #[repr(u8)]
 pub enum GridDataType {
@@ -105,7 +103,7 @@ pub enum GridDataType {
 
 /// The compression type of data.
 #[derive(
-    Default, Clone, FromRepr, Debug, PartialEq, EnumCount, EnumDiscriminants, EnumString, ToString,
+    Default, Clone, FromRepr, Debug, PartialEq, EnumCount, EnumDiscriminants, EnumString, Display,
 )]
 #[repr(u8)]
 pub enum CompressionType {
@@ -431,9 +429,9 @@ impl GridBuffer {
 
     /// Extend rows and columns.
     #[inline]
-    pub fn extend_rows_cols(&mut self, num_rows: usize, col_ids: &Vec<u32>) {
+    pub fn extend_rows_cols(&mut self, num_rows: usize, col_ids: &Vec<u32>) -> Result<()> {
         self.extend_rows(num_rows);
-        self.extend_cols(col_ids);
+        self.extend_cols(col_ids)
     }
 
     /// Push a cell into the grid buffer.
@@ -451,7 +449,7 @@ impl GridBuffer {
     ///
     /// TODO: speed up the search.
     #[inline]
-    fn get_col_by_id(&self, col_id: u32) -> Option<usize> {
+    pub fn get_col_by_id(&self, col_id: u32) -> Option<usize> {
         match self.col_index.get(&col_id) {
             Some(id) => Some(id.value().clone()),
             None => None,
@@ -996,7 +994,7 @@ impl GridBuffer {
     /// the compressed index in bytes.
     fn u64_data_to_bytes_with_sorted(&self, buf: &mut Vec<u8>, sorter: &mut U32Sorter) {
         // Align to u32.
-        let (prefix, middle, suffix) = unsafe { self.u64_data.align_to::<u32>() };
+        let (_prefix, middle, _suffix) = unsafe { self.u64_data.align_to::<u32>() };
 
         sorter.sort(middle);
 
@@ -1107,8 +1105,6 @@ impl GridBuffer {
         total_num_u64_values: usize,
     ) -> Result<(Vec<u64>, usize)> {
         // compressed_u64_data_len.
-        let usize_size = 4;
-
         let compression_type = match CompressionType::from_repr(bytes[start_pos]) {
             Some(compression_type) => compression_type,
             None => {
@@ -1151,8 +1147,6 @@ impl GridBuffer {
         total_num_u32_values: usize,
     ) -> Result<(Vec<u32>, usize)> {
         // compressed_u32_data_len.
-        let usize_size = 4;
-
         let compression_type = match CompressionType::from_repr(bytes[start_pos]) {
             Some(compression_type) => compression_type,
             None => {
@@ -1233,9 +1227,6 @@ impl GridBuffer {
         total_num_u32_values: usize,
         is_sorted: bool,
     ) -> Result<(Vec<u32>, usize)> {
-        // usize_size, fixed as 4.
-        let usize_size = 4;
-
         // pos in bytes.
         let mut pos = start_pos;
 
@@ -1466,7 +1457,7 @@ impl GridBuffer {
     fn parse_f32_data(
         bytes: &[u8],
         start_pos: usize,
-        total_num_f32_values: usize,
+        _total_num_f32_values: usize,
     ) -> Result<(Vec<f32>, usize)> {
         let mut pos = start_pos;
 
@@ -1513,7 +1504,7 @@ impl GridBuffer {
         let (u64_data, pos) = Self::parse_u64_data(bytes, pos, basic_info.total_num_u64_values)?;
         check_data_length(u64_data.len(), basic_info.total_num_u64_values)?;
 
-        let (f32_data, pos) = Self::parse_f32_data(bytes, pos, basic_info.total_num_f32_values)?;
+        let (f32_data, _pos) = Self::parse_f32_data(bytes, pos, basic_info.total_num_f32_values)?;
         check_data_length(f32_data.len(), basic_info.total_num_f32_values)?;
 
         Ok(GridBuffer::new_with_fields(
@@ -1530,24 +1521,24 @@ impl GridBuffer {
     /// Serialize the GridBuffer to base64.
     pub fn to_base64(&self) -> String {
         let bytes = self.to_bytes();
-        base64::encode(&bytes)
+        general_purpose::STANDARD.encode(&bytes)
     }
 
     /// Serialize the GridBuffer to base64 with BitPacker.
     pub fn to_base64_with_bitpacking<T: BitPacker + GetCompressionType>(&self) -> String {
         let bytes = self.to_bytes_with_bitpacking::<T>();
-        base64::encode(&bytes)
+        general_purpose::STANDARD.encode(&bytes)
     }
 
     /// Serialize the GridBuffer to bytes with sorted, then to base64.
     pub fn to_base64_with_sorted(&self, sorter: &mut U32Sorter) -> String {
         let bytes = self.to_bytes_with_sorted(sorter);
-        base64::encode(&bytes)
+        general_purpose::STANDARD.encode(&bytes)
     }
 
     /// Deserialize the GridBuffer from base64.
     pub fn from_base64(base64: &str) -> Result<Self> {
-        let bytes = base64::decode(base64)?;
+        let bytes = general_purpose::STANDARD.decode(base64)?;
         Self::from_bytes(&bytes)
     }
 
@@ -1643,7 +1634,7 @@ impl GridBuffer {
         &self,
         data: &[u64],
     ) -> Vec<u8> {
-        let (prefix, middle, suffix) = unsafe { data.align_to::<u32>() };
+        let (_prefix, middle, _suffix) = unsafe { data.align_to::<u32>() };
 
         compress_bitpacker::<T>(middle)
     }
@@ -1651,7 +1642,7 @@ impl GridBuffer {
     /// Compress the u64 data using bitpacking4x.
     #[inline]
     fn compress_u64_data_bitpacking4x(&self, data: &[u64]) -> Vec<u8> {
-        let (prefix, middle, suffix) = unsafe { data.align_to::<u32>() };
+        let (_prefix, middle, _suffix) = unsafe { data.align_to::<u32>() };
 
         compress_bitpacker4x(middle)
     }
@@ -1659,7 +1650,7 @@ impl GridBuffer {
     /// Compress the u64 data using bitpacking8x.
     #[inline]
     fn compress_u64_data_bitpacking8x(&self, data: &[u64]) -> Vec<u8> {
-        let (prefix, middle, suffix) = unsafe { data.align_to::<u32>() };
+        let (_prefix, middle, _suffix) = unsafe { data.align_to::<u32>() };
 
         compress_bitpacker8x(middle)
     }
@@ -1678,7 +1669,7 @@ impl GridBuffer {
     /// Compress f32 in the future.
     #[inline]
     fn compress_f32_data<'a>(&self, data: &'a [f32]) -> &'a [u8] {
-        let (prefix, middle, suffix) = unsafe { data.align_to::<u8>() };
+        let (_prefix, middle, _suffix) = unsafe { data.align_to::<u8>() };
 
         middle
     }
@@ -1882,7 +1873,6 @@ mod tests {
     use crate::core::tool::setup_log;
 
     use super::*;
-    use log::info;
 
     #[test]
     fn test_gridbuffer_creation() {

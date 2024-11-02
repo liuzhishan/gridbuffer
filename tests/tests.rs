@@ -1,18 +1,13 @@
 //! Test.
 #![feature(portable_simd)]
-use core::simd::prelude::*;
-
 use anyhow::Result;
 
 use bitpacking::BitPacker;
 use bitpacking::BitPacker4x;
-use bitpacking::BitPacker8x;
 
-use gridbuffer::core::performance::convert_simple_features_to_gridbuffer_file_with_bitpacking;
 use gridbuffer::core::performance::convert_simple_features_to_gridbuffer_file_with_bitpacking4x;
 use gridbuffer::core::performance::convert_simple_features_to_gridbuffer_file_with_bitpacking8x;
 use gridbuffer::core::performance::convert_simple_features_to_gridbuffer_file_with_sorted;
-use gridbuffer::core::performance::convert_simple_features_to_gridbuffer_file_without_sorted;
 use gridbuffer::core::performance::read_gridbuffer_from_file;
 use gridbuffer::core::performance::read_simple_features_from_file;
 use gridbuffer::core::performance::time_convert_simple_features_to_gridbuffer;
@@ -220,9 +215,9 @@ fn timing_read_simple_features_from_file() -> Result<()> {
 
         let simple_features = read_simple_features_from_file(filename)?;
 
-        let mut count_sparse = 0;
+        let mut _count_sparse = 0;
         for feature in simple_features {
-            count_sparse += feature.sparse_feature.len();
+            _count_sparse += feature.sparse_feature.len();
         }
 
         times.push(timer.get_elapsed_micros());
@@ -252,9 +247,9 @@ fn timing_read_gridbuffer_from_file_with_bitpacking4x() -> Result<()> {
 
         let gridbuffers = read_gridbuffer_from_file(filename)?;
 
-        let mut count = 0;
+        let mut _count = 0;
         for gridbuffer in gridbuffers {
-            count += gridbuffer.num_cols() * gridbuffer.num_rows();
+            _count += gridbuffer.num_cols() * gridbuffer.num_rows();
         }
 
         times.push(timer.get_elapsed_micros());
@@ -283,9 +278,9 @@ fn timing_read_gridbuffer_from_file_with_bitpacking8x() -> Result<()> {
 
         let gridbuffers = read_gridbuffer_from_file(filename)?;
 
-        let mut count = 0;
+        let mut _count = 0;
         for gridbuffer in gridbuffers {
-            count += gridbuffer.num_cols() * gridbuffer.num_rows();
+            _count += gridbuffer.num_cols() * gridbuffer.num_rows();
         }
 
         times.push(timer.get_elapsed_micros());

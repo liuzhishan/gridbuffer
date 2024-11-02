@@ -1,9 +1,7 @@
 //! Timer for performance test.
 
-use anyhow::{anyhow, bail, Result};
-use log::{error, info};
-
-use coarsetime::{Duration, Instant, Updater};
+use coarsetime::Instant;
+use log::info;
 
 /// Timer.
 pub struct Timer {

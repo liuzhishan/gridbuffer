@@ -1,15 +1,4 @@
-use anyhow::{anyhow, bail, Result};
-use bitpacking::{BitPacker, BitPacker4x, BitPacker8x};
-use log::{error, info};
-
-use prost::Message;
-
-use std::io::BufWriter;
-use std::io::{BufRead, BufReader, Read, Write};
-
-use super::gridbuffer::GetCompressionType;
-use super::{gridbuffer::GridBuffer, timer::Timer};
-use crate::core::tool::U32Sorter;
+use super::gridbuffer::GridBuffer;
 use crate::sniper::SimpleFeatures;
 
 /// SimpleFeatures iterator to GridBuffer iterator.
@@ -46,7 +35,7 @@ impl<I: Iterator<Item = SimpleFeatures>> Iterator for SimpleFeaturesBatcher<I> {
             }
 
             let mut col = 0;
-            for (i, sparse_feature) in features.sparse_feature.iter().enumerate() {
+            for sparse_feature in features.sparse_feature.iter() {
                 // Remove prefix.
                 let u64_values = &sparse_feature
                     .values
@@ -59,7 +48,7 @@ impl<I: Iterator<Item = SimpleFeatures>> Iterator for SimpleFeaturesBatcher<I> {
                 col += 1;
             }
 
-            for (i, dense_feature) in features.dense_feature.iter().enumerate() {
+            for dense_feature in features.dense_feature.iter() {
                 let f32_values = &dense_feature.values;
                 self.buffer.push_f32_values(self.row, col, f32_values);
 

@@ -1,7 +1,6 @@
 //! Gridbuffer.
 #![feature(portable_simd)]
-use std::arch::x86_64::*;
-use std::simd::prelude::*;
+#![allow(dead_code)]
 
 pub mod sniper {
     include!(concat!(env!("OUT_DIR"), "/sniper.rs"));

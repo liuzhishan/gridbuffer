@@ -4,14 +4,16 @@
 //! Compare the performance with protobuf's own serialization and deserialization.
 //! Also the size of the serialized data is the same.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::Result;
 use bitpacking::{BitPacker, BitPacker4x, BitPacker8x};
 use log::{error, info};
 
 use prost::Message;
 
 use std::io::BufWriter;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
+
+use base64::{engine::general_purpose, Engine as _};
 
 use super::gridbuffer::GetCompressionType;
 use super::{gridbuffer::GridBuffer, timer::Timer};
@@ -22,7 +24,7 @@ use crate::sniper::SimpleFeatures;
 
 /// Parse SimpleFeatures from base64 encoded protobuf data.
 pub fn parse_simple_features(data: &str) -> Result<SimpleFeatures> {
-    let decoded_data = base64::decode(data)?;
+    let decoded_data = general_purpose::STANDARD.decode(data)?;
     let simple_features = SimpleFeatures::decode(&*decoded_data)?;
     Ok(simple_features)
 }
@@ -51,10 +53,10 @@ pub fn time_parse_simple_features_from_file(file_path: &str) -> Result<()> {
 
     let timer = Timer::new("parse_simple_features_from_file".to_string());
 
-    let mut count = 0;
+    let mut _count = 0;
 
-    for simple_features in read_simple_features_from_reader(reader) {
-        count += 1;
+    for _simple_features in read_simple_features_from_reader(reader) {
+        _count += 1;
     }
 
     timer.print_elapsed();
@@ -66,7 +68,7 @@ pub fn time_parse_simple_features_from_file(file_path: &str) -> Result<()> {
 pub fn convert_simple_features_to_gridbuffer(
     file_path: &str,
     num_rows: usize,
-    num_cols: usize,
+    _num_cols: usize,
 ) -> Result<SimpleFeaturesBatcher<impl Iterator<Item = SimpleFeatures>>> {
     let file = std::fs::File::open(file_path)?;
     let reader = BufReader::new(file);

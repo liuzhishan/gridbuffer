@@ -1,11 +1,7 @@
 //! SIMD operations.
 
-#![feature(portable_simd)]
-use std::arch::x86_64::*;
-use std::simd::prelude::*;
-
-use likely_stable::{likely, unlikely};
-use log::{error, info};
+use likely_stable::likely;
+use log::error;
 
 use bitpacking::BitPacker;
 use bitpacking::BitPacker4x;
