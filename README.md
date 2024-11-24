@@ -2,4 +2,4 @@
 
 `gridbuffer` 是基于 `simd` 加速的专为广告模型样本设计的序列化格式。
 
-详细文档见: https://liuzhishan.github.io/gridbuffer/#/
+详细文档见(文档待完善): https://liuzhishan.github.io/gridbuffer/#/
